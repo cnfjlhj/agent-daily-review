@@ -1,0 +1,40 @@
+{
+  "name": "agent-daily-review",
+  "version": "0.1.0",
+  "description": "Daily reflection reports for Codex and Claude Code sessions, with HTML output, Telegram delivery, skill packaging, and nightly cron automation.",
+  "main": "src/utils/agent-daily-report.js",
+  "scripts": {
+    "daily": "node scripts/agent-daily-review/run-daily-report.js",
+    "nightly": "node scripts/agent-daily-review/run-nightly-report.js",
+    "install-cron": "bash scripts/agent-daily-review/install-cron.sh",
+    "skill:install": "bash scripts/install-codex-skill.sh",
+    "test": "node tests/test-agent-daily-report.js && node tests/test-agent-daily-report-compact.js && node tests/test-session-telegram-target.js && node tests/test-run-nightly-report.js && node tests/test-send-daily-html-report.js && node tests/test-send-daily-html-report-public-config.js && node tests/test-run-nightly-report-public-config.js && node tests/test-install-agent-daily-review-cron.js"
+  },
+  "keywords": [
+    "codex",
+    "claude-code",
+    "daily-review",
+    "session-analysis",
+    "telegram",
+    "cron",
+    "skill"
+  ],
+  "author": "cnfjlhj",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cnfjlhj/agent-daily-review.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cnfjlhj/agent-daily-review/issues"
+  },
+  "homepage": "https://github.com/cnfjlhj/agent-daily-review#readme",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.71.2",
+    "axios": "^1.13.2",
+    "form-data": "^4.0.4"
+  }
+}

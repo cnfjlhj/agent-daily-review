@@ -1,0 +1,12 @@
+{
+  "homeDir": "/home/your-user",
+  "outRoot": "/absolute/path/to/Claude-Code-Remote/work/agent-daily-review",
+  "analysisMode": "heuristic",
+  "session": "daily_review_bot",
+  "caption": "完整 HTML 日报",
+  "telegram": {
+    "botToken": "123456:replace-me",
+    "chatId": "123456789",
+    "botName": "agent-daily-review"
+  }
+}

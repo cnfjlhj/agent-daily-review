@@ -1,0 +1,12 @@
+{
+  "homeDir": "/home/your-user",
+  "outRoot": "/absolute/path/to/agent-daily-review/work/agent-daily-review",
+  "analysisMode": "heuristic",
+  "session": "codex_new",
+  "caption": "完整 HTML 日报",
+  "telegram": {
+    "botToken": "123456:replace-me",
+    "chatId": "123456789",
+    "botName": "agent-daily-review"
+  }
+}
