@@ -1,191 +1,128 @@
 # Agent Daily Review
 
-`Agent Daily Review` is a first-principles daily reflection system for `Codex` and `Claude Code`.
+每天睡前，自动扫一遍你当天用过的 Codex / Claude Code 会话，告诉你：今天到底干了什么，哪些是有效产出，哪些是在转圈。
 
-It scans the sessions you actually used on a given day, reconstructs what work really happened, points out where your usage pattern was good or bad, and renders the result as a readable HTML report that can also be sent to Telegram.
+生成一份 HTML 报告，可以发到 Telegram，也可以本地看。
 
-## Why This Exists
+## 它回答什么问题
 
-The goal is not to dump metrics.
+不是 token 用量统计，不是 API 调用计数。是更实在的东西：
 
-The goal is to answer:
+- 今天通过 vibe coding 实际推进了什么？
+- 哪些会话产出了真正的代码/文档？
+- 哪些会话只是在兜圈子、跑题、或者注意力分散？
+- 哪里是我用错了 Agent？哪里是 Agent 自己答得不好？
+- 明天最该改掉的一个习惯是什么？
 
-- What did I actually do today through vibe coding?
-- Which sessions produced real output?
-- Which sessions were just churn, drift, or split attention?
-- Where did the user misuse the agent?
-- Where did the agent answer badly or fail to hold boundaries?
-- What is the one rule I should change tomorrow?
+## 工作原理
 
-## First-Principles Model
-
-```text
-declared goal
-    |
-    v
-same-day activity slice
-    |
-    v
-actual landing
-    |
-    +--> same as goal      => productive
-    +--> mixed side topic  => session hygiene warning
-    +--> different target  => drift / boundary failure
+```
+你设定的目标
+     |
+     v
+当天实际会话活动
+     |
+     v
+最终着陆点
+     |
+     ├── 和目标一致     → 有效产出
+     ├── 夹杂副话题     → 会话卫生警告
+     └── 完全偏离       → 漂移 / 边界失守
 ```
 
-Core rules:
+核心判断逻辑：
 
-- one session should usually contain one primary task
-- if multiple themes enter one session, that is a workflow smell
-- session ownership belongs to the day of the activity, not only the creation date
-- short sessions still matter if they consumed attention or changed direction
+- 一个会话应该只做一件事
+- 多个主题挤进同一个会话 = 工作流异味
+- 会话归属看活动时间，不看创建时间
+- 短会话如果消耗了注意力或改变了方向，一样计入
 
-## What You Get
+## 你会得到什么
 
-- `report.html`
-  The human-readable daily reflection report.
-- `report.json`
-  The machine-readable representation.
-- Telegram full-HTML delivery
-  Optional, either by direct token/chat id or via session-based resolver.
-- Nightly cron
-  Optional, defaulting to `23:30` in `Asia/Shanghai`.
-- A packaged Codex skill
-  For easy manual preview, rerun, and redistribution.
+| 产物 | 说明 |
+|------|------|
+| `report.html` | 可读的每日复盘报告 |
+| `report.json` | 机器可读版本，方便二次加工 |
+| Telegram 推送 | 完整 HTML 直接发到手机（可选） |
+| 定时任务 | 每晚 23:30 自动跑（可选） |
+| Codex Skill | 装好就能手动触发预览或重跑 |
 
-## Quick Start
-
-Install:
+## 快速上手
 
 ```bash
 npm install
-```
-
-Create a config:
-
-```bash
 cp agent-daily-review.example.json agent-daily-review.local.json
+# 编辑配置：至少填 homeDir 和 outRoot
 ```
 
-Edit at least:
-
-- `homeDir`
-- `outRoot`
-- `session` or `telegram.botToken` / `telegram.chatId`
-
-Generate one day:
+跑一天试试：
 
 ```bash
-npm run daily -- --config ./agent-daily-review.local.json --date 2026-03-23
+npm run daily -- --config ./agent-daily-review.local.json --date 2026-03-24
 ```
 
-Run the nightly flow:
-
-```bash
-npm run nightly -- --config ./agent-daily-review.local.json
-```
-
-Dry-run the nightly flow without sending:
+不发 Telegram，只看本地：
 
 ```bash
 npm run nightly -- --config ./agent-daily-review.local.json --dry-run
 ```
 
-## Cron
+## 定时任务
 
-Install the default `23:30` cron:
+装上以后每晚自动跑：
 
 ```bash
 npm run install-cron -- --config "$(pwd)/agent-daily-review.local.json"
 ```
 
-Remove it:
+卸载：
 
 ```bash
 npm run install-cron -- --remove
 ```
 
-## Skill
+## 三种分析模式
 
-Install the bundled Codex skill:
+| 模式 | 特点 | 适合场景 |
+|------|------|----------|
+| `heuristic` | 纯规则，快且稳 | 每晚 cron 自动跑 |
+| `auto` | 规则优先，必要时语义补充 | 日常使用 |
+| `compact-first` | 语义阅读为主 | 长会话深度分析 |
 
-```bash
-npm run skill:install
+## Telegram 推送
+
+三种投递方式：
+
+- **direct**：命令行传 `--bot-token` 和 `--chat-id`
+- **config**：写在 JSON 配置里
+- **cc-connect**：复用已有的会话级 Telegram 通道
+
+## 时区处理
+
+按 `Asia/Shanghai` 自然日切片：
+
+- 昨天创建但今天又用了的会话 → 算今天的
+- 只统计今天的活动部分
+- 跨天会话在附录里标注为 `跨天续用`
+
+## 项目结构
+
+```
+src/utils/                  核心分析逻辑
+scripts/agent-daily-review/ CLI 入口和 cron 工具
+scripts/telegram/           Telegram HTML 发送
+skills/agent-daily-review/  打包好的 Codex Skill
+tests/                      测试套件
 ```
 
-After that, the local skill lives under:
-
-```text
-skills/agent-daily-review
-```
-
-and wraps the same `daily`, `nightly`, and `install-cron` flows used by the CLI.
-
-## Delivery Modes
-
-- `direct`
-  Pass `--bot-token` and `--chat-id`.
-- `config`
-  Put the Telegram target in JSON config.
-- `cc-connect`
-  Reuse session-based Telegram resolution if your local environment already has it.
-
-## Session Time Rules
-
-This repo uses `Asia/Shanghai` natural-day slicing.
-
-That means:
-
-- a session created yesterday but used again today is included today
-- only today's activities are counted in today's report
-- the appendix marks such sessions as `跨天续用`
-
-```text
-session creation time != report ownership
-activity timestamp    == report ownership
-```
-
-## Stable vs Experimental
-
-- `heuristic`
-  Best for reliable nightly cron jobs.
-- `auto`
-  Heuristics first, selective semantic compact.
-- `compact-first`
-  More semantic reading, but slower on very long tool-heavy sessions.
-
-## Repo Layout
-
-```text
-src/utils/                  core analysis and target resolution
-scripts/agent-daily-review/ CLI entrypoints and cron helpers
-scripts/telegram/           Telegram HTML sender
-skills/agent-daily-review/  packaged Codex skill
-tests/                      focused verification suite
-```
-
-## Verification
-
-Run the full focused suite:
+## 测试
 
 ```bash
 npm test
 ```
 
-This covers:
+覆盖：日切片、跨天处理、短会话、混合话题检测、HTML 渲染、dry-run、Telegram dry-run、cron 安装。
 
-- day slicing
-- cross-day session handling
-- short-session inclusion
-- mixed-topic session detection
-- HTML rendering
-- nightly dry-run
-- public config mode
-- Telegram dry-run
-- cron installer behavior
+## License
 
-## More Detail
-
-The implementation notes and operational guide live at:
-
-- [scripts/agent-daily-review/README.md](./scripts/agent-daily-review/README.md)
+MIT
