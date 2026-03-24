@@ -16,6 +16,8 @@ function parseArgs(argv) {
     homeDir: '',
     outRoot: '',
     config: '',
+    factsPath: '',
+    factsMode: '',
     session: '',
     caption: '',
     analysisMode: '',
@@ -41,6 +43,12 @@ function parseArgs(argv) {
       i += 1;
     } else if (current === '--out-root' && next) {
       args.outRoot = next;
+      i += 1;
+    } else if (current === '--facts-path' && next) {
+      args.factsPath = next;
+      i += 1;
+    } else if (current === '--facts-mode' && next) {
+      args.factsMode = next;
       i += 1;
     } else if (current === '--session' && next) {
       args.session = next;
@@ -85,6 +93,8 @@ function printHelp() {
     '  --config <path>        JSON config file for open-source/public use',
     '  --home-dir <path>      Home directory to read Codex/Claude logs from',
     '  --out-root <path>      Root output directory (default: work/agent-daily-review)',
+    '  --facts-path <path>    Optional SQLite facts cache path (default: <home>/.agent-daily-review/facts.db)',
+    '  --facts-mode <mode>    refresh | prefer-cache',
     '  --session <name>       Fixed Telegram session/bot binding for the nightly report',
     '  --caption <text>       Optional Telegram caption',
     '  --analysis-mode <m>    heuristic | compact-first | auto',
@@ -111,13 +121,26 @@ async function runNightlyReport(options = {}) {
     date,
     homeDir: resolved.homeDir,
     outDir,
+    factsPath: resolved.factsPath,
+    factsMode: resolved.factsMode || process.env.AGENT_DAILY_REPORT_FACTS_MODE || 'refresh',
     analysisMode: resolved.analysisMode || process.env.AGENT_DAILY_REPORT_ANALYSIS_MODE || 'auto'
   });
 
   const caption = resolved.caption || `${generated.report.date} 使用习惯审计`;
   let delivery = null;
 
-  if (!resolved.skipSend) {
+  if (!resolved.skipSend && generated.report.qualityGate && generated.report.qualityGate.pass === false) {
+    delivery = {
+      blocked: true,
+      reason: 'quality-gate',
+      issues: generated.report.qualityGate.issues || [],
+      target: {
+        session: resolved.session || '',
+        source: 'quality-gate',
+        chatId: resolved.chatId || (resolved.telegram && resolved.telegram.chatId) || ''
+      }
+    };
+  } else if (!resolved.skipSend) {
     delivery = await sendDailyHtmlReport({
       ...resolved,
       reportFile: generated.htmlPath,
@@ -150,6 +173,12 @@ async function main() {
 
   if (args.skipSend) {
     console.log('SEND=skipped');
+    return;
+  }
+
+  if (output.delivery && output.delivery.blocked) {
+    console.log('SEND=blocked_by_quality_gate');
+    console.log(`QUALITY_ISSUES=${output.delivery.issues.length}`);
     return;
   }
 

@@ -39,6 +39,8 @@ function resolveAgentDailyReviewConfig(options = {}, env = process.env) {
     homeDir: normalizeString(options.homeDir || fileConfig.homeDir || env.AGENT_DAILY_REPORT_HOME_DIR) || os.homedir(),
     outRoot: normalizeString(options.outRoot || fileConfig.outRoot || env.AGENT_DAILY_REPORT_OUT_ROOT),
     outDir: normalizeString(options.outDir || fileConfig.outDir || env.AGENT_DAILY_REPORT_OUT_DIR),
+    factsPath: normalizeString(options.factsPath || fileConfig.factsPath || env.AGENT_DAILY_REPORT_FACTS_PATH),
+    factsMode: normalizeString(options.factsMode || fileConfig.factsMode || env.AGENT_DAILY_REPORT_FACTS_MODE),
     analysisMode: normalizeString(options.analysisMode || fileConfig.analysisMode || env.AGENT_DAILY_REPORT_ANALYSIS_MODE),
     session: normalizeString(options.session || fileConfig.session || env.AGENT_DAILY_REPORT_SESSION),
     caption: normalizeString(options.caption || fileConfig.caption || env.AGENT_DAILY_REPORT_CAPTION),

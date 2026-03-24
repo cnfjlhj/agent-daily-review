@@ -883,12 +883,38 @@ async function run() {
     /旁支|停车场|主线/,
     'should distill the day into one concrete next-day rule'
   );
+  assert.ok(
+    pivotSession.facts,
+    'should attach stable session facts to analyzed sessions'
+  );
+  assert.match(
+    pivotSession.facts.location,
+    /Codex|播客/,
+    'stable session facts should carry a human-readable location card'
+  );
+  assert.match(
+    pivotSession.facts.openingUserQuote,
+    /播客|文字版/,
+    'stable session facts should preserve the opening user quote'
+  );
+  assert.match(
+    pivotSession.facts.closingAssistantQuote,
+    /Telegram HTML 发送链路|主线已经从播客转写偏到/,
+    'stable session facts should preserve the closing assistant quote'
+  );
 
   const html = renderDailyHtml(analyzed);
   assert.match(html, /Codex \/ Claude Code 使用习惯审计/, 'html should reflect the mixed-agent daily scope in the title');
   assert.match(html, /这一天你把 Codex \/ Claude Code 用对了吗/, 'html should reflect the mixed-agent daily scope in the top-level question');
   assert.match(html, /来源：Codex 6 条，Claude Code 2 条/, 'html should show the per-agent source breakdown');
   assert.match(html, /今天按事情看，你一共做了这些事/, 'html should foreground the work overview first');
+  assert.match(html, /你能定位的地方：/, 'html work overview should tell the user where each thing happened in human-readable language');
+  assert.match(html, /核实状态：/, 'html work overview should explicitly label whether a thing is verified or still unresolved');
+  assert.match(html, /第一性原理判断：/, 'html work overview should explicitly state whether a core thing changed the world or only reduced uncertainty');
+  assert.match(html, /为什么会显得很忙：/, 'html work overview should explain the mechanism behind busy-looking work');
+  assert.match(html, /责任拆解：/, 'html work overview should split responsibility across user, agent, and mechanism');
+  assert.match(html, /开场原话/, 'html work overview should keep the opening user quote');
+  assert.match(html, /AI 停点原话/, 'html work overview should keep the assistant-side stopping quote');
   assert.match(html, /这一天你实际上把时间花在了哪里/, 'html should foreground what the user actually did during the day');
   assert.match(html, /真正推进了什么/, 'html should show the progress bucket');
   assert.match(html, /查清了什么/, 'html should show the clarified bucket');

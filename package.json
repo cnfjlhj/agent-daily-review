@@ -8,7 +8,7 @@
     "nightly": "node scripts/agent-daily-review/run-nightly-report.js",
     "install-cron": "bash scripts/agent-daily-review/install-cron.sh",
     "skill:install": "bash scripts/install-codex-skill.sh",
-    "test": "node tests/test-agent-daily-report.js && node tests/test-agent-daily-report-compact.js && node tests/test-session-telegram-target.js && node tests/test-run-nightly-report.js && node tests/test-send-daily-html-report.js && node tests/test-send-daily-html-report-public-config.js && node tests/test-run-nightly-report-public-config.js && node tests/test-install-agent-daily-review-cron.js"
+    "test": "node tests/test-agent-daily-report.js && node tests/test-agent-daily-report-compact.js && node tests/test-agent-daily-report-facts-store.js && node tests/test-agent-daily-report-truth-guard.js && node tests/test-session-telegram-target.js && node tests/test-run-daily-report-facts-cache.js && node tests/test-run-nightly-report.js && node tests/test-run-nightly-report-quality-gate.js && node tests/test-send-daily-html-report.js && node tests/test-send-daily-html-report-public-config.js && node tests/test-run-nightly-report-public-config.js && node tests/test-install-agent-daily-review-cron.js"
   },
   "keywords": [
     "codex",

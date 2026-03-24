@@ -20,6 +20,8 @@ function parseArgs(argv) {
     homeDir: '',
     outDir: '',
     config: '',
+    factsPath: '',
+    factsMode: '',
     analysisMode: '',
     jsonOnly: false
   };
@@ -39,6 +41,12 @@ function parseArgs(argv) {
       i += 1;
     } else if (current === '--out-dir' && next) {
       args.outDir = next;
+      i += 1;
+    } else if (current === '--facts-path' && next) {
+      args.factsPath = next;
+      i += 1;
+    } else if (current === '--facts-mode' && next) {
+      args.factsMode = next;
       i += 1;
     } else if (current === '--analysis-mode' && next) {
       args.analysisMode = next;
@@ -66,6 +74,8 @@ function printHelp() {
     '  --config <path>        JSON config file for open-source/public use',
     '  --home-dir <path>      Home directory to read Codex/Claude logs from',
     '  --out-dir <path>       Output directory (default: work/agent-daily-review/<date>)',
+    '  --facts-path <path>    Optional SQLite facts cache path (default: <home>/.agent-daily-review/facts.db)',
+    '  --facts-mode <mode>    refresh | prefer-cache',
     '  --analysis-mode <m>    heuristic | compact-first | auto',
     '  --json-only            Print JSON summary and skip HTML write'
   ].join('\n'));
@@ -81,12 +91,16 @@ async function generateDailyReport(options = {}) {
     date: resolved.date || toLocalDateString(new Date().toISOString()),
     homeDir: resolved.homeDir || os.homedir(),
     outDir: resolved.outDir || options.outDir || '',
+    factsPath: resolved.factsPath || options.factsPath || '',
+    factsMode: resolved.factsMode || options.factsMode || process.env.AGENT_DAILY_REPORT_FACTS_MODE || 'refresh',
     jsonOnly: Boolean(options.jsonOnly),
     analysisMode: resolved.analysisMode || process.env.AGENT_DAILY_REPORT_ANALYSIS_MODE || 'auto'
   };
   const collected = collectDayActivity({
     date: args.date,
-    homeDir: args.homeDir
+    homeDir: args.homeDir,
+    factsPath: args.factsPath,
+    factsMode: args.factsMode
   });
   const report = await analyzeDayActivity(collected, {
     analysisMode: args.analysisMode,

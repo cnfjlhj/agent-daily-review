@@ -6,6 +6,11 @@ const {
   createDefaultSessionCompactor,
   resolveAnalysisMode
 } = require('./agent-session-compact');
+const {
+  defaultFactsPath,
+  loadDayFacts,
+  saveDayFacts
+} = require('./agent-day-facts');
 
 const NOISE_PREFIXES = [
   '# AGENTS.md instructions',
@@ -16,6 +21,16 @@ const NOISE_PREFIXES = [
 
 const TOPIC_PATTERNS = [
   {
+    tag: 'daily-reflection',
+    label: '日报/反思系统',
+    patterns: [/日报|daily report|反思|复盘|insights?|session.*(分析|反思|复盘)|会话.*(分析|日报|复盘)/i]
+  },
+  {
+    tag: 'claude-learning',
+    label: 'Learn Claude Code 学习',
+    patterns: [/learn claude code|shareai\.run\/en\/s\d+|claude code 学习|claude code 课程/i]
+  },
+  {
     tag: 'transcription',
     label: '播客转写',
     patterns: [/小宇宙|播客|音频|文字版|时间戳|transcript|transcribe|audio/i]
@@ -23,7 +38,7 @@ const TOPIC_PATTERNS = [
   {
     tag: 'telegram-html',
     label: 'Telegram HTML 发送',
-    patterns: [/telegram|senddocument|report\.html|完整.*html|\bhtml\b/i]
+    patterns: [/telegram|senddocument|report\.html|完整.*html|html.*telegram|发.*html/i]
   },
   {
     tag: 'mubu-cli',
@@ -44,6 +59,26 @@ const TOPIC_PATTERNS = [
     tag: 'research-intel',
     label: 'research-intel 论文推送系统',
     patterns: [/research-intel|论文推送|paper intelligence|paper push/i]
+  },
+  {
+    tag: 'arxiv-metadata',
+    label: 'arXiv 信息核对',
+    patterns: [/arxiv\.org\/abs|affiliation|作者信息|机构信息|名字.*机构|机构.*名字/i]
+  },
+  {
+    tag: 'skill-governance',
+    label: 'Skill/Agent 设计',
+    patterns: [/frontmatter|skill named|skill.*description|agents?\.md|skills? governance|skill 治理/i]
+  },
+  {
+    tag: 'probe',
+    label: '一句话探针',
+    patterns: [/reply with exactly|reply with exactly one line|one short line|package=<name>|^ok$|^pong$/i]
+  },
+  {
+    tag: 'form-filling',
+    label: '表格/文稿填写',
+    patterns: [/承诺践诺|承诺事项|志愿者服务活动|填写.*表|内容说明/i]
   }
 ];
 
@@ -428,7 +463,7 @@ function estimateReviewDepth(session, resolutionType, semanticPivot) {
   if (semanticPivot) {
     score += 2;
   }
-  if (['adjacent-infra-takeover', 'packaging-blocked', 'churned-exploration'].includes(resolutionType)) {
+  if (['adjacent-infra-takeover', 'packaging-blocked', 'unverified-landing', 'churned-exploration'].includes(resolutionType)) {
     score += 2;
   }
   if (['diagnosis-complete', 'disproved-path'].includes(resolutionType)) {
@@ -447,13 +482,74 @@ function estimateReviewDepth(session, resolutionType, semanticPivot) {
   return 'skim';
 }
 
-function buildHumanTaskTitle(session, goalLabel) {
+function isInstructionProbePrompt(prompt) {
+  return /reply with exactly|reply with exactly one line|one short line|package=<name>|^ok$|^pong$/i.test(String(prompt || ''));
+}
+
+function chooseStableTaskLabel({
+  prompt,
+  goalTag,
+  landingTag,
+  goalLabel,
+  landingLabel,
+  resolutionType
+} = {}) {
+  const normalizedPrompt = String(prompt || '');
+  const promptFlags = classifyPrompt(normalizedPrompt);
+
+  if (goalTag && landingTag && resolutionType === 'adjacent-infra-takeover' && goalLabel && landingLabel && goalLabel !== landingLabel) {
+    return `从${goalLabel}偏到${landingLabel}`;
+  }
+
+  if (goalTag) {
+    return goalLabel;
+  }
+
+  if (landingTag && (promptFlags.vague || promptFlags.uncertain || isInstructionProbePrompt(normalizedPrompt))) {
+    return landingLabel;
+  }
+
+  if (landingTag && !goalLabel) {
+    return landingLabel;
+  }
+
+  return goalLabel || landingLabel || '';
+}
+
+function buildHumanTaskTitle(session, goalLabel, options = {}) {
   const prompt = String(session.prompt || session.lastUserRequest || '');
+  const stableLabel = chooseStableTaskLabel({
+    prompt,
+    goalTag: options.goalTag || '',
+    landingTag: options.landingTag || '',
+    goalLabel,
+    landingLabel: options.landingLabel || '',
+    resolutionType: options.resolutionType || ''
+  });
+
   if (/\/star|star 为什么会失败|排查\s*\/star/i.test(prompt)) {
     return '/star 排查那条';
   }
+  if (/learn claude code|shareai\.run\/en\/s\d+|claude code 学习|claude code 课程/i.test(prompt)) {
+    return 'Learn Claude Code 学习那条';
+  }
+  if (/日报|daily report|反思|复盘|insights?|session.*(分析|反思|复盘)|会话.*(分析|日报|复盘)/i.test(prompt)) {
+    return '日报/反思系统那条';
+  }
   if (/Star History|star history|star-history/i.test(prompt)) {
     return 'ai-collab-playbook README 星标那条';
+  }
+  if (/arxiv\.org\/abs|affiliation|作者信息|机构信息|名字.*机构|机构.*名字/i.test(prompt)) {
+    return 'arXiv 信息核对那条';
+  }
+  if (/frontmatter|skill named|skill.*description|agents?\.md|skills? governance|skill 治理/i.test(prompt)) {
+    return 'Skill/Agent 设计那条';
+  }
+  if (/承诺践诺|承诺事项|志愿者服务活动|填写.*表|内容说明/i.test(prompt)) {
+    return '表格/文稿填写那条';
+  }
+  if (isInstructionProbePrompt(prompt)) {
+    return '一句话探针那条';
   }
   if (/(research-intel|论文推送).*(README|宣传)|(?:README|宣传).*(research-intel|论文推送)/i.test(prompt)) {
     return 'research-intel README 宣传那条';
@@ -473,7 +569,85 @@ function buildHumanTaskTitle(session, goalLabel) {
   if (/research-intel|论文推送/i.test(prompt)) {
     return '论文推送系统那条';
   }
-  return `${goalLabel}那条`;
+  if (stableLabel) {
+    return `${truncate(stableLabel, 26)}那条`;
+  }
+  return `${truncate(goalLabel || prompt || '未命名任务', 26)}那条`;
+}
+
+function deriveSessionGoalLabel(session) {
+  const text = String(session.prompt || session.lastUserRequest || '').trim();
+  const goalScores = mergeTopicScores(
+    collectTopicScores([text]),
+    collectTopicScores([session.projectLabel || '', session.cwd || '']),
+    collectTopicScores(listFileBasenames(session.touchedFiles || [], 4))
+  );
+  const goalTag = topTopic(goalScores, '');
+  return goalTag ? topicLabel(goalTag) : truncate(text || '未命名任务', 32);
+}
+
+function stableQuote(text, fallback = '—', maxLength = 140) {
+  const normalized = truncate(text || fallback, maxLength);
+  return normalized || fallback;
+}
+
+function buildStableSessionFacts(session) {
+  const turns = Array.isArray(session.transcriptTurns) ? session.transcriptTurns : [];
+  const firstUserTurn = turns.find((turn) => turn.role === 'user' && turn.text);
+  const lastUserTurn = [...turns].reverse().find((turn) => turn.role === 'user' && turn.text);
+  const lastAssistantTurn = [...turns].reverse().find((turn) => turn.role === 'assistant' && turn.text);
+  const goalLabel = deriveSessionGoalLabel(session);
+  const totalTools = Object.values(session.toolCounts || {}).reduce((sum, value) => sum + value, 0);
+  const deepReadReasons = [];
+
+  if (session.continuedFromPreviousDay) {
+    deepReadReasons.push('跨天续用');
+  }
+  if (turns.length >= 8) {
+    deepReadReasons.push(`对话较长（${turns.length} 轮）`);
+  }
+  if ((session.eventCounts && session.eventCounts.context_compacted) > 0) {
+    deepReadReasons.push('出现 compact');
+  }
+  if ((session.eventCounts && session.eventCounts.turn_aborted) > 0) {
+    deepReadReasons.push('出现 abort');
+  }
+  if (totalTools >= 10) {
+    deepReadReasons.push(`工具动作较多（${totalTools} 次）`);
+  }
+
+  return {
+    title: buildHumanTaskTitle(session, goalLabel),
+    goalLabel,
+    location: `${session.projectLabel || 'unknown'} · ${formatAgentName(session.agent)} · ${formatTimeSpan(session.startAt || session.sessionStartAt, session.endAt || session.sessionEndAt)}`,
+    openingUserQuote: stableQuote(
+      (firstUserTurn && firstUserTurn.text) || session.prompt || session.lastUserRequest || '',
+      '—'
+    ),
+    latestUserQuote: stableQuote(
+      (lastUserTurn && lastUserTurn.text) || session.lastUserRequest || session.prompt || '',
+      '—'
+    ),
+    closingAssistantQuote: stableQuote(
+      (lastAssistantTurn && lastAssistantTurn.text) || session.assistantExcerpt || '',
+      '—'
+    ),
+    needsDeepRead: deepReadReasons.length > 0,
+    deepReadReasons
+  };
+}
+
+function ensureSessionFacts(session) {
+  if (!session || typeof session !== 'object') {
+    return session;
+  }
+  if (session.facts && session.facts.title && session.facts.location) {
+    return session;
+  }
+  return {
+    ...session,
+    facts: buildStableSessionFacts(session)
+  };
 }
 
 function formatAgentName(agent) {
@@ -482,6 +656,64 @@ function formatAgentName(agent) {
 
 function assistantPrefix(session) {
   return formatAgentName(session.agent);
+}
+
+function buildOpenEndedLanding(session, options = {}) {
+  const goalLabel = options.goalLabel || '当前任务';
+  const secondaryTopicLabels = Array.isArray(options.secondaryTopicLabels) ? options.secondaryTopicLabels : [];
+  const totalTools = Number(options.totalTools || 0);
+  const compactions = Number(options.compactions || 0);
+  const aborts = Number(options.aborts || 0);
+  const hasDeliverable = Boolean(options.hasDeliverable);
+
+  if (compactions > 0 || aborts > 0) {
+    return {
+      actual: `这轮真正消耗时间的不是推进 ${goalLabel}，而是反复 compact / abort / 重新接上下文；结尾留下了动作痕迹，但没有留下结论。`,
+      summary: `${goalLabel} 被上下文折返吞掉了。`
+    };
+  }
+  if (session.planCount >= 2 && !hasDeliverable) {
+    return {
+      actual: `这轮主要在为 ${goalLabel} 搭计划、拆步骤、整理入口，但计划没有真正转成落地动作。`,
+      summary: `${goalLabel} 还停在执行前的整理阶段。`
+    };
+  }
+  if (session.readCount >= 8 && session.writeCount === 0) {
+    return {
+      actual: `这轮主要在围着 ${goalLabel} 读上下文、找线索、补背景，但最终没有把判断钉成一句清楚的结论。`,
+      summary: `${goalLabel} 主要停在查找和理解阶段。`
+    };
+  }
+  if (secondaryTopicLabels.length > 0) {
+    return {
+      actual: `这轮表面还在做 ${goalLabel}，但 ${secondaryTopicLabels.join('、')} 已经混进来，导致注意力被摊薄，最后哪个都没有彻底做完。`,
+      summary: `${goalLabel} 被次级话题摊薄了。`
+    };
+  }
+  if (totalTools >= 10) {
+    return {
+      actual: `这轮围着 ${goalLabel} 做了很多工具动作，但工具调用次数本身没有转成交付、诊断闭环或明确停点。`,
+      summary: `${goalLabel} 有动作，但没有收成。`
+    };
+  }
+  return {
+    actual: `这轮把 ${goalLabel} 提起来了，但最后还是停在“知道自己还没真正做完”的位置。`,
+    summary: `${goalLabel} 还没有形成明确落点。`
+  };
+}
+
+function summarizeDialogueOutcome(session, goalLabel) {
+  const assistantText = truncate(session.assistantExcerpt || session.assistantMessages[session.assistantMessages.length - 1] || '', 140);
+  if (assistantText) {
+    return assistantText;
+  }
+
+  const lastUserText = truncate(session.lastUserRequest || '', 120);
+  if (lastUserText) {
+    return `这轮对 ${goalLabel} 的最后停点还停在：${lastUserText}`;
+  }
+
+  return `这轮主要还在围着 ${goalLabel} 继续讨论和确认。`;
 }
 
 function renderTurnSpeaker(session, role) {
@@ -577,8 +809,13 @@ function findFirstMatchingTurn(session, pattern, roles = []) {
   return null;
 }
 
-function buildCaseSummary(session, goalLabel, landingLabel, landingTag, resolutionType, firstWrongTurn, driftOrigin) {
-  const title = buildHumanTaskTitle(session, goalLabel);
+function buildCaseSummary(session, goalLabel, goalTag, landingLabel, landingTag, resolutionType, firstWrongTurn, driftOrigin) {
+  const title = buildHumanTaskTitle(session, goalLabel, {
+    goalTag,
+    landingTag,
+    landingLabel,
+    resolutionType
+  });
   const wrongTurnText = firstWrongTurn ? firstWrongTurn.text : '';
   const assistantLabel = assistantPrefix(session);
   let userQuote = {
@@ -592,6 +829,7 @@ function buildCaseSummary(session, goalLabel, landingLabel, landingTag, resoluti
     polarity: 'neutral'
   };
   let turnLabel = '关键转折';
+  let turnIndex = firstWrongTurn ? firstWrongTurn.index : -1;
   let turnText = firstWrongTurn
     ? `${renderTurnSpeaker(session, firstWrongTurn.role)}：${firstWrongTurn.text}`
     : '没有明显的偏航转折。';
@@ -632,6 +870,7 @@ function buildCaseSummary(session, goalLabel, landingLabel, landingTag, resoluti
       ['assistant']
     );
     turnLabel = '闭环发生在这里';
+    turnIndex = diagnosisTurn ? diagnosisTurn.index : turnIndex;
     turnText = diagnosisTurn
       ? `${assistantLabel} 说了：${diagnosisTurn.text}`
       : `${assistantLabel} 说了：${truncate(session.assistantExcerpt || '—', 200)}`;
@@ -651,6 +890,7 @@ function buildCaseSummary(session, goalLabel, landingLabel, landingTag, resoluti
       /Request too large|max 20MB|too large|上传.*失败|transfer.*卡住|blocked by|卡住/i
     );
     turnLabel = '第一次暴露交付风险';
+    turnIndex = blockingTurn ? blockingTurn.index : turnIndex;
     turnText = blockingTurn
       ? `${renderTurnSpeaker(session, blockingTurn.role)}：${blockingTurn.text}`
       : `${assistantLabel} 说了：${truncate(session.assistantExcerpt || '—', 200)}`;
@@ -664,6 +904,20 @@ function buildCaseSummary(session, goalLabel, landingLabel, landingTag, resoluti
       judgment: '这里暴露出 agent 在交付前没有提前检查体积或传输限制。',
       polarity: 'bad'
     };
+  } else if (resolutionType === 'unverified-landing') {
+    turnLabel = '目前真正能确认的停点';
+    turnIndex = (session.transcriptTurns || []).map((turn) => turn.role).lastIndexOf('assistant');
+    turnText = `${assistantLabel} 说了：${truncate(session.assistantExcerpt || session.lastUserRequest || '—', 200)}`;
+    userQuote = {
+      text: truncate(session.prompt || session.lastUserRequest || '—', 200),
+      judgment: '这句定义了原始目标，问题不在你到底想做什么。',
+      polarity: 'good'
+    };
+    agentQuote = {
+      text: truncate(session.assistantExcerpt || '—', 200),
+      judgment: '这句最多说明了对话里停在哪里，不能自动等于“主线已经落地”。',
+      polarity: 'neutral'
+    };
   } else if (resolutionType === 'disproved-path') {
     const disproofTurn = findFirstMatchingTurn(
       session,
@@ -671,6 +925,7 @@ function buildCaseSummary(session, goalLabel, landingLabel, landingTag, resoluti
       ['assistant']
     );
     turnLabel = '证伪发生在这里';
+    turnIndex = disproofTurn ? disproofTurn.index : turnIndex;
     turnText = disproofTurn
       ? `${assistantLabel} 说了：${disproofTurn.text}`
       : `${assistantLabel} 说了：${truncate(session.assistantExcerpt || '—', 200)}`;
@@ -686,6 +941,7 @@ function buildCaseSummary(session, goalLabel, landingLabel, landingTag, resoluti
     };
   } else if (resolutionType === 'context-recovery') {
     turnLabel = '这轮主要在做什么';
+    turnIndex = 0;
     turnText = truncate(session.prompt || session.lastUserRequest || '—', 200);
     userQuote = {
       text: truncate(session.prompt || session.lastUserRequest || '—', 200),
@@ -694,20 +950,27 @@ function buildCaseSummary(session, goalLabel, landingLabel, landingTag, resoluti
     };
   } else if (resolutionType === 'shipped') {
     turnLabel = '真正落地的时刻';
+    turnIndex = (session.transcriptTurns || []).map((turn) => turn.role).lastIndexOf('assistant');
     turnText = `${assistantLabel} 说了：${truncate(session.assistantExcerpt || '已经完成并落地。', 200)}`;
   }
 
-  let verdict = '这条会话整体是中性的。';
+  let verdict = `${goalLabel} 这条把问题抬出来了，但没有把结果钉住，所以目前更像半成品，而不是闭环。`;
   if (resolutionType === 'adjacent-infra-takeover') {
     verdict = `你原本在做 ${goalLabel}，最后却做到了 ${landingLabel}。真正的问题不是工作没做，而是主线被换掉了。`;
   } else if (resolutionType === 'diagnosis-complete') {
     verdict = `这条会话虽然没写文件，但 ${goalLabel} 的根因被清楚定位了，这是一次正确使用 agent 的例子。`;
   } else if (resolutionType === 'packaging-blocked') {
     verdict = `${goalLabel} 本身推进得不错，但最后一公里卡在交付约束，说明 agent 在“快完成时的验收意识”还不够。`;
+  } else if (resolutionType === 'unverified-landing') {
+    verdict = `${goalLabel} 这条最危险的不是完全没做，而是现在没法诚实地说“它到底落在哪了”。文件动过，但主线落点仍待核实。`;
   } else if (resolutionType === 'disproved-path') {
     verdict = `${goalLabel} 这条的价值在于快速排除错误路径，而不是假装把路径走通。`;
   } else if (resolutionType === 'shipped') {
     verdict = `${goalLabel} 这条最后真正落地了，说明这轮主线是守住的。`;
+  } else if (resolutionType === 'context-recovery') {
+    verdict = `${goalLabel} 这条主要在把上下文找回来，所以它不是正式产出，更像开工前的准备动作。`;
+  } else if (resolutionType === 'churned-exploration') {
+    verdict = `${goalLabel} 这条的问题不是“完全没做”，而是精力被反复折返和上下文重接吃掉了，最后只剩忙感，没有剩判断。`;
   }
 
   return {
@@ -717,6 +980,7 @@ function buildCaseSummary(session, goalLabel, landingLabel, landingTag, resoluti
     userQuote,
     agentQuote,
     turnLabel,
+    turnIndex,
     turnText,
     firstWrongTurn: firstWrongTurn
       ? `${renderTurnSpeaker(session, firstWrongTurn.role)}：${firstWrongTurn.text}`
@@ -730,6 +994,7 @@ function casePriorityScore(session) {
   const resolutionWeights = {
     'adjacent-infra-takeover': 120,
     'packaging-blocked': 110,
+    'unverified-landing': 105,
     'churned-exploration': 100,
     'diagnosis-complete': 85,
     'disproved-path': 80,
@@ -741,6 +1006,93 @@ function casePriorityScore(session) {
   return (resolutionWeights[session.analysis.resolutionType] || 0)
     + ((session.compaction.reviewDepth === 'deep') ? 20 : session.compaction.reviewDepth === 'focused' ? 10 : 0)
     + ((session.analysis.goalFidelity === 'low') ? 10 : 0);
+}
+
+function semanticNeedScore(session) {
+  let score = casePriorityScore(session);
+  if (session.analysis && session.analysis.needsSemanticReview) {
+    score += 60;
+  }
+  if (session.analysis && session.analysis.semanticPivot) {
+    score += 40;
+  }
+  if (session.derived && session.derived.hasDeliverable) {
+    score += 10;
+  }
+  if (session.derived && session.derived.loopRisk) {
+    score += 18;
+  }
+  if (session.continuedFromPreviousDay) {
+    score += 12;
+  }
+  return score;
+}
+
+function sessionSemanticKey(session) {
+  return `${session.agent}:${session.sessionId}`;
+}
+
+function isOversizedForNightlyCompact(session) {
+  const maxActivities = Number(process.env.AGENT_DAILY_REPORT_MAX_DEEP_ACTIVITIES || 2000);
+  const activityCount = Array.isArray(session.activities) ? session.activities.length : 0;
+  return Number.isFinite(maxActivities) && maxActivities > 0 && activityCount > maxActivities;
+}
+
+function pickSemanticCompactionKeys(heuristicSessions, analysisMode, options = {}) {
+  if (!Array.isArray(heuristicSessions) || !heuristicSessions.length || analysisMode === 'heuristic') {
+    return new Set();
+  }
+
+  const requestedLimit = Number(
+    options.maxSemanticSessions
+    || process.env.AGENT_DAILY_REPORT_MAX_SEMANTIC_SESSIONS
+    || (analysisMode === 'compact-first' ? 6 : 4)
+  );
+  const limit = Number.isFinite(requestedLimit) && requestedLimit > 0
+    ? Math.max(1, Math.floor(requestedLimit))
+    : 6;
+  const selected = new Set();
+  const addSession = (session) => {
+    if (session && !isOversizedForNightlyCompact(session)) {
+      selected.add(sessionSemanticKey(session));
+    }
+  };
+
+  const mustInclude = heuristicSessions
+    .filter((session) => session.analysis.needsSemanticReview
+      || ['adjacent-infra-takeover', 'packaging-blocked', 'unverified-landing'].includes(session.analysis.resolutionType))
+    .sort((left, right) => semanticNeedScore(right) - semanticNeedScore(left));
+  const exploratory = heuristicSessions
+    .filter((session) => ['churned-exploration', 'exploration', 'context-recovery'].includes(session.analysis.resolutionType))
+    .sort((left, right) => semanticNeedScore(right) - semanticNeedScore(left));
+  const wins = heuristicSessions
+    .filter((session) => ['diagnosis-complete', 'disproved-path', 'shipped'].includes(session.analysis.resolutionType))
+    .sort((left, right) => semanticNeedScore(right) - semanticNeedScore(left));
+  const ranked = [...heuristicSessions].sort((left, right) => semanticNeedScore(right) - semanticNeedScore(left));
+
+  for (const session of mustInclude) {
+    addSession(session);
+  }
+  for (const session of exploratory) {
+    if (selected.size >= limit) {
+      break;
+    }
+    addSession(session);
+  }
+  for (const session of wins) {
+    if (selected.size >= Math.min(limit, Math.max(2, mustInclude.length + 1))) {
+      break;
+    }
+    addSession(session);
+  }
+  for (const session of ranked) {
+    if (selected.size >= limit) {
+      break;
+    }
+    addSession(session);
+  }
+
+  return selected;
 }
 
 function sortActivitiesByTimestamp(left, right) {
@@ -877,7 +1229,7 @@ function buildSessionSlice(session, sliceActivities, date) {
 
   const agentModel = model || session.model || session.agent;
 
-  return {
+  const slice = {
     agent: session.agent,
     sessionId: session.sessionId,
     date,
@@ -919,6 +1271,61 @@ function buildSessionSlice(session, sliceActivities, date) {
       && toLocalDateString(session.sessionStartAt) !== date
     )
   };
+
+  slice.facts = buildStableSessionFacts(slice);
+  return slice;
+}
+
+function activitySignature(activity) {
+  const item = activity || {};
+  return [
+    item.kind || '',
+    item.timestamp || '',
+    item.role || '',
+    item.name || '',
+    normalizePrompt(item.text || ''),
+    Array.isArray(item.files) ? item.files.join('|') : ''
+  ].join('||');
+}
+
+function mergeSessionSlices(left, right, date) {
+  const activityMap = new Map();
+  for (const activity of [...(left.activities || []), ...(right.activities || [])]) {
+    const key = activitySignature(activity);
+    if (!activityMap.has(key)) {
+      activityMap.set(key, activity);
+    }
+  }
+
+  const mergedActivities = Array.from(activityMap.values()).sort(sortActivitiesByTimestamp);
+  const richer = (left.activities || []).length >= (right.activities || []).length ? left : right;
+  const mergedSession = {
+    agent: richer.agent || left.agent || right.agent,
+    sessionId: richer.sessionId || left.sessionId || right.sessionId,
+    cwd: richer.cwd || left.cwd || right.cwd,
+    projectLabel: richer.projectLabel || left.projectLabel || right.projectLabel,
+    prompt: richer.prompt || left.prompt || right.prompt,
+    model: richer.model || left.model || right.model,
+    sourceFile: richer.sourceFile || left.sourceFile || right.sourceFile,
+    activities: mergedActivities,
+    sessionStartAt: [left.sessionStartAt, right.sessionStartAt].filter(Boolean).sort()[0] || '',
+    sessionEndAt: [left.sessionEndAt, right.sessionEndAt].filter(Boolean).sort().slice(-1)[0] || ''
+  };
+
+  return buildSessionSlice(mergedSession, mergedActivities, date);
+}
+
+function dedupeCollectedSessions(sessions, date) {
+  const byKey = new Map();
+  for (const session of sessions) {
+    const key = `${session.agent}:${session.sessionId}:${date}`;
+    if (!byKey.has(key)) {
+      byKey.set(key, session);
+      continue;
+    }
+    byKey.set(key, mergeSessionSlices(byKey.get(key), session, date));
+  }
+  return Array.from(byKey.values());
 }
 
 function parseCodexSession(filePath, homeDir) {
@@ -1090,9 +1497,7 @@ function parseClaudeSession(filePath, homeDir) {
   };
 }
 
-function collectDayActivity(options = {}) {
-  const date = options.date || toLocalDateString(new Date().toISOString());
-  const homeDir = options.homeDir || os.homedir();
+function collectDaySlicesFromProviders(date, homeDir) {
   const sessions = [];
 
   const codexDir = path.join(homeDir, '.codex', 'sessions');
@@ -1133,11 +1538,39 @@ function collectDayActivity(options = {}) {
     }
   }
 
-  sessions.sort((left, right) => {
-    return (left.startAt || '').localeCompare(right.startAt || '');
-  });
+  const dedupedSessions = dedupeCollectedSessions(sessions, date);
+  dedupedSessions.sort((left, right) => (left.startAt || '').localeCompare(right.startAt || ''));
+  return dedupedSessions;
+}
 
-  const byAgent = sessions.reduce((acc, session) => {
+function collectDayActivity(options = {}) {
+  const date = options.date || toLocalDateString(new Date().toISOString());
+  const homeDir = options.homeDir || os.homedir();
+  const factsPath = options.factsPath || defaultFactsPath(homeDir);
+  const factsMode = options.factsMode || 'refresh';
+
+  const cached = loadDayFacts({
+    date,
+    factsPath,
+    homeDir
+  });
+  if (factsMode === 'prefer-cache' && cached && cached.sessions && cached.sessions.length > 0) {
+    return cached;
+  }
+
+  const dedupedSessions = collectDaySlicesFromProviders(date, homeDir);
+
+  if (dedupedSessions.length > 0) {
+    saveDayFacts({
+      date,
+      factsPath,
+      sessions: dedupedSessions
+    });
+  } else if (cached && cached.sessions && cached.sessions.length > 0) {
+    return cached;
+  }
+
+  const byAgent = dedupedSessions.reduce((acc, session) => {
     acc[session.agent] = (acc[session.agent] || 0) + 1;
     return acc;
   }, {});
@@ -1145,9 +1578,10 @@ function collectDayActivity(options = {}) {
   return {
     date,
     homeDir,
-    sessions,
+    factsPath,
+    sessions: dedupedSessions,
     summary: {
-      totalSessions: sessions.length,
+      totalSessions: dedupedSessions.length,
       byAgent
     }
   };
@@ -1160,6 +1594,7 @@ function formatResolutionType(value) {
     'diagnosis-complete': '诊断闭环',
     'disproved-path': '快速证伪',
     'packaging-blocked': '交付受阻',
+    'unverified-landing': '落点待核实',
     'context-recovery': '只找回上下文',
     'churned-exploration': '空转/抖动',
     exploration: '探索中'
@@ -1230,22 +1665,34 @@ function buildSessionAnalysis(session, homeDir) {
   const landingScores = mergeTopicScores(continuationScores, fileScores);
   const goalTag = topTopic(goalScores, '');
   const landingTag = topTopic(landingScores, goalTag);
+  const goalAnchored = Boolean(goalTag);
+  const landingAnchored = Boolean(landingTag);
+  const landingSupportedByConversation = Boolean(landingTag && (continuationScores[landingTag] || 0) > 0);
   const rankedLandingTopics = rankTopics(landingScores);
   const firstWrongTurn = findFirstWrongTurn(session, goalTag);
+  const goalConversationSupport = goalTag ? ((goalScores[goalTag] || 0) + (continuationScores[goalTag] || 0)) : 0;
+  const landingConversationSupport = landingTag ? ((continuationScores[landingTag] || 0) + ((fileScores[landingTag] || 0) * 2)) : 0;
   const semanticPivot = Boolean(
     goalTag
     && landingTag
     && goalTag !== landingTag
-    && ((fileScores[landingTag] || 0) > 0 || (landingScores[landingTag] || 0) > (landingScores[goalTag] || 0))
+    && (
+      landingConversationSupport >= goalConversationSupport + 3
+      || ((fileScores[landingTag] || 0) > 0 && goalConversationSupport === 0)
+    )
   );
-  const secondaryTopicLabels = rankedLandingTopics
-    .filter((item) => item.tag !== landingTag)
-    .filter((item) => item.score >= 2)
-    .slice(0, 2)
-    .map((item) => item.label);
+  const secondaryTopicLabels = goalTag && landingTag && goalTag !== landingTag
+    ? [topicLabel(landingTag)]
+    : uniqueValues(
+      rankedLandingTopics
+        .filter((item) => item.tag !== landingTag && item.tag !== goalTag)
+        .filter((item) => item.score >= 2)
+        .slice(0, 2)
+        .map((item) => item.label)
+    ).slice(0, 2);
   const mainlineDiscipline = semanticPivot
     ? 'drifted'
-    : secondaryTopicLabels.length > 0
+    : (secondaryTopicLabels.length > 0 || (goalTag && landingTag && goalTag !== landingTag))
       ? 'mixed'
       : 'single-thread';
 
@@ -1254,6 +1701,7 @@ function buildSessionAnalysis(session, homeDir) {
     session.lastUserRequest,
     ...session.assistantMessages.slice(-2)
   ].filter(Boolean);
+  const landingFileSupport = landingTag ? (fileScores[landingTag] || 0) : 0;
 
   const hasBlockingSignal = hasDeliverable && matchesAnyPattern(
     transcriptTail,
@@ -1267,6 +1715,20 @@ function buildSessionAnalysis(session, homeDir) {
     transcriptTail,
     /没找到|找不到|不存在|没有现成|只能自己转录|需要自己转写|not found|need to transcribe|disproved/i
   );
+  const hasDeliveryCue = hasDeliverable && matchesAnyPattern(
+    transcriptTail,
+    /已(经)?(完成|修好|搞定|落地|推上去|发过去|补齐|支持|新增|加上|写好)|验证通过|现在.*(可用|能用|直接用)|已把|commit|push|sent|fixed|implemented|updated/i
+  );
+  const deliverableSupportedByFilesOrDialogue = Boolean(landingFileSupport > 0 || hasDeliveryCue);
+  const truthRisk = Boolean(
+    hasDeliverable
+    && !hasBlockingSignal
+    && (!goalAnchored || !landingAnchored || !landingSupportedByConversation || !deliverableSupportedByFilesOrDialogue)
+  );
+  const needsSemanticReview = Boolean(
+    truthRisk
+    || (!goalAnchored && ((session.transcriptTurns || []).length >= 4 || session.continuedFromPreviousDay))
+  );
 
   let resolutionType = 'exploration';
   if (hasBlockingSignal) {
@@ -1275,6 +1737,8 @@ function buildSessionAnalysis(session, homeDir) {
     resolutionType = 'diagnosis-complete';
   } else if (hasDisproofSignal) {
     resolutionType = 'disproved-path';
+  } else if (truthRisk) {
+    resolutionType = 'unverified-landing';
   } else if (semanticPivot && hasDeliverable) {
     resolutionType = 'adjacent-infra-takeover';
   } else if (hasDeliverable) {
@@ -1286,15 +1750,17 @@ function buildSessionAnalysis(session, homeDir) {
   }
 
   let goalFidelity = 'medium';
-  if (['shipped', 'diagnosis-complete', 'disproved-path', 'packaging-blocked'].includes(resolutionType) && !semanticPivot) {
+  if (['shipped', 'diagnosis-complete', 'disproved-path', 'packaging-blocked'].includes(resolutionType) && !semanticPivot && !truthRisk) {
     goalFidelity = 'high';
-  } else if (['adjacent-infra-takeover', 'churned-exploration'].includes(resolutionType)) {
+  } else if (['adjacent-infra-takeover', 'churned-exploration', 'unverified-landing'].includes(resolutionType)) {
     goalFidelity = 'low';
   }
 
   let problemSource = 'none';
   if (resolutionType === 'adjacent-infra-takeover') {
     problemSource = 'workflow';
+  } else if (resolutionType === 'unverified-landing') {
+    problemSource = 'mixed';
   } else if (resolutionType === 'packaging-blocked') {
     problemSource = 'environment';
   } else if (resolutionType === 'churned-exploration') {
@@ -1320,10 +1786,24 @@ function buildSessionAnalysis(session, homeDir) {
   const landingLabel = landingTag ? topicLabel(landingTag) : goalLabel;
   const touchedNames = listFileBasenames(session.touchedFiles, 3);
   const reviewDepth = estimateReviewDepth(session, resolutionType, semanticPivot);
+  const openEndedLanding = buildOpenEndedLanding(session, {
+    goalLabel,
+    secondaryTopicLabels,
+    totalTools,
+    compactions,
+    aborts,
+    hasDeliverable
+  });
 
-  let actualLanding = '停留在探索阶段，没有形成清晰落点。';
-  let landingSummary = `${goalLabel} 仍停留在探索阶段。`;
-  if (resolutionType === 'adjacent-infra-takeover') {
+  let actualLanding = openEndedLanding.actual;
+  let landingSummary = openEndedLanding.summary;
+  if (resolutionType === 'unverified-landing') {
+    const dialogueOutcome = summarizeDialogueOutcome(session, goalLabel);
+    actualLanding = touchedNames.length
+      ? `从对话真正能确认的停点看，这轮主要得到的是：${dialogueOutcome}。虽然顺手碰了 ${touchedNames.join(', ')}，但这些文件不能单独证明 ${goalLabel} 已经落地。`
+      : `从对话真正能确认的停点看，这轮主要得到的是：${dialogueOutcome}。目前还不能把这条 session 诚实地判成“已经落地”。`;
+    landingSummary = `${goalLabel} 的真实落点不能只靠文件判断。`;
+  } else if (resolutionType === 'adjacent-infra-takeover') {
     actualLanding = `会话最后落在 ${landingLabel}，而不是起始想做的 ${goalLabel}${touchedNames.length ? `（落盘文件：${touchedNames.join(', ')}）` : ''}。`;
     landingSummary = `${goalLabel} 主线被 ${landingLabel} 接管。`;
   } else if (resolutionType === 'diagnosis-complete') {
@@ -1341,13 +1821,12 @@ function buildSessionAnalysis(session, homeDir) {
   } else if (resolutionType === 'context-recovery') {
     actualLanding = '这轮主要在找回上下文，为下一轮开工做准备，没有形成独立产物。';
     landingSummary = `${goalLabel} 只完成了上下文找回。`;
-  } else if (resolutionType === 'churned-exploration') {
-    actualLanding = '会话里出现了明显的上下文抖动，但没有转换成清晰结论或交付。';
-    landingSummary = `${goalLabel} 出现上下文抖动，未形成落点。`;
   }
 
   let userVerdict = '这轮里你的使用行为没有暴露出明显坏习惯。';
-  if (driftOrigin === 'user-opened-side-quest') {
+  if (resolutionType === 'unverified-landing') {
+    userVerdict = '你这轮原始目标本身并不糊，但 session 拉长之后又混入了顺手动作，导致最后文件痕迹和主线事实不再一一对应。';
+  } else if (driftOrigin === 'user-opened-side-quest') {
     userVerdict = `你在主线中途引入了旁支诉求：${firstWrongTurn ? firstWrongTurn.text : landingLabel}。这不是不能问，但应该被隔离成后续任务，而不是插进当前主线。`;
   } else if (/不要急着改文件|先帮我定位根因|先排查/i.test(session.prompt || '')) {
     userVerdict = '你这轮做对了：先要求定位根因，而不是上来就让 agent 乱改。';
@@ -1363,7 +1842,9 @@ function buildSessionAnalysis(session, homeDir) {
 
   const agentLabel = assistantPrefix(session);
   let agentVerdict = '这轮里 agent 的行为总体没有明显失守。';
-  if (resolutionType === 'adjacent-infra-takeover') {
+  if (resolutionType === 'unverified-landing') {
+    agentVerdict = `${agentLabel} 做错了：它把“顺手碰过的文件”当成了这条主线的落地证据，但对话里真正完成的并不是那件事。`;
+  } else if (resolutionType === 'adjacent-infra-takeover') {
     agentVerdict = `${agentLabel} 做错了：它没有把旁支隔离成待办或下一轮任务，而是让旁支直接接管了当前主线。`;
   } else if (resolutionType === 'diagnosis-complete') {
     agentVerdict = `${agentLabel} 做对了：没有急着改文件，而是先把根因说清，保住了诊断闭环。`;
@@ -1378,7 +1859,9 @@ function buildSessionAnalysis(session, homeDir) {
   }
 
   let interactionVerdict = '这轮人机配合总体稳定。';
-  if (driftOrigin === 'user-opened-side-quest') {
+  if (resolutionType === 'unverified-landing') {
+    interactionVerdict = '这轮真正的风险不是完全没做事，而是 session 过长后，收尾动作和文件痕迹开始污染主线判断。';
+  } else if (driftOrigin === 'user-opened-side-quest') {
     interactionVerdict = '互动模式的问题是：你先开了旁支，agent 又没有设边界，于是整轮被顺势带偏。';
   } else if (driftOrigin === 'assistant-hijack') {
     interactionVerdict = '互动模式的问题是：agent 自己把主线偷换成了另一个更顺手的任务。';
@@ -1392,6 +1875,7 @@ function buildSessionAnalysis(session, homeDir) {
   const caseSummary = buildCaseSummary(
     session,
     goalLabel,
+    goalTag,
     landingLabel,
     landingTag,
     resolutionType,
@@ -1409,10 +1893,13 @@ function buildSessionAnalysis(session, homeDir) {
       resolutionType,
       goalFidelity,
       semanticPivot,
+      truthRisk,
+      needsSemanticReview,
       goalTag,
       goalLabel,
       landingTag,
       landingLabel,
+      landingSupportedByConversation,
       secondaryTopicLabels,
       mainlineDiscipline,
       problemSource,
@@ -1420,7 +1907,8 @@ function buildSessionAnalysis(session, homeDir) {
     },
     compaction: {
       reviewDepth,
-      summary: caseSummary.compactSummary
+      summary: caseSummary.compactSummary,
+      source: 'heuristic'
     },
     caseSummary,
     behavior: {
@@ -1429,6 +1917,21 @@ function buildSessionAnalysis(session, homeDir) {
       agentVerdict,
       interactionVerdict
     },
+    firstPrinciples: buildFirstPrinciplesAudit({
+      analysis: {
+        resolutionType,
+        promptArchetype,
+        mainlineDiscipline
+      },
+      behavior: {
+        driftOrigin
+      },
+      derived: {
+        compactions,
+        aborts,
+        totalTools
+      }
+    }),
     derived: {
       label: resolutionType,
       totalTools,
@@ -1468,15 +1971,19 @@ function buildWorkstreams(sessions) {
 
 function buildDayNarrative(sessions) {
   const adjacentSessions = sessions.filter((session) => session.analysis.resolutionType === 'adjacent-infra-takeover');
+  const unverifiedSessions = sessions.filter((session) => session.analysis.resolutionType === 'unverified-landing');
   const diagnosisSessions = sessions.filter((session) => ['diagnosis-complete', 'disproved-path'].includes(session.analysis.resolutionType));
   const blockedSessions = sessions.filter((session) => session.analysis.resolutionType === 'packaging-blocked');
   const shippedSessions = sessions.filter((session) => session.analysis.resolutionType === 'shipped');
-  const resolvedSessions = sessions.filter((session) => !['exploration', 'churned-exploration', 'context-recovery'].includes(session.analysis.resolutionType));
+  const resolvedSessions = sessions.filter((session) => !['exploration', 'churned-exploration', 'context-recovery', 'unverified-landing'].includes(session.analysis.resolutionType));
 
   let headline = 'Mixed execution day';
   let summary = '这一天既有产出，也有一些会话没有把起始目标守住。';
 
-  if (resolvedSessions.length >= 3 && adjacentSessions.length > 0) {
+  if (unverifiedSessions.length > 0) {
+    headline = 'Busy-looking day with truth-risk sessions';
+    summary = '这一天不只是有偏航，更有几条会话的“落地”其实无法只靠文件痕迹成立，说明日报必须先纠正 session 真相。';
+  } else if (resolvedSessions.length >= 3 && adjacentSessions.length > 0) {
     headline = 'High-output day with boundary leakage';
     summary = '真实产出是有的，但至少有一条主线被邻近的工具/基础设施工作接管了，看起来很忙，实际上偏离了原始目标。';
   } else if (diagnosisSessions.length >= 2 && shippedSessions.length === 0) {
@@ -1504,7 +2011,9 @@ function buildDayNarrative(sessions) {
     biggestLeakage: biggestLeakageSession
       ? `${biggestLeakageSession.caseSummary.title} · ${biggestLeakageSession.analysis.actualLanding}`
       : '今天没有明显的邻近任务接管主线。',
-    tomorrowCorrection: adjacentSessions.length > 0
+    tomorrowCorrection: unverifiedSessions.length > 0
+      ? '先按对话里的闭环判断真实落点，再看文件痕迹；不要让“顺手碰到的文件”冒充主线交付。'
+      : adjacentSessions.length > 0
       ? '先写清本轮“必须守住的原始目标”和“允许顺手修、但不能接管会话的旁支工作”，让 agent 遇到偏航时主动提醒。'
       : blockedSessions.length > 0
         ? '优先补齐交付链路里的包装/传输约束，再继续扩写内容，避免卡在最后一米。'
@@ -1545,6 +2054,7 @@ function buildBehavioralAudit(sessions) {
   }
 
   const pivotSessions = sessions.filter((session) => session.analysis.resolutionType === 'adjacent-infra-takeover');
+  const truthRiskSessions = sessions.filter((session) => session.analysis.resolutionType === 'unverified-landing');
   if (pivotSessions.length > 0) {
     const pivotAgentLabel = summarizeAgentSet(pivotSessions);
     agent.push({
@@ -1573,6 +2083,14 @@ function buildBehavioralAudit(sessions) {
       evidence: blockedSessions.map((session) => session.caseSummary.title)
     });
   }
+  if (truthRiskSessions.length > 0) {
+    const truthRiskAgentLabel = summarizeAgentSet(truthRiskSessions);
+    agent.push({
+      title: `${truthRiskAgentLabel} 还会把文件痕迹误当成主线落地`,
+      detail: `${truthRiskAgentLabel} 现在还会把“顺手碰过哪些文件”直接翻译成“这条 session 完成了什么”，这会制造很像样但不诚实的复盘。`,
+      evidence: truthRiskSessions.map((session) => session.caseSummary.title)
+    });
+  }
 
   if (userSideQuestSessions.length > 0 && pivotSessions.length > 0) {
     const interactionAgentLabel = summarizeAgentSet(pivotSessions);
@@ -1580,6 +2098,13 @@ function buildBehavioralAudit(sessions) {
       title: `你开旁支，${interactionAgentLabel} 又没守边界，于是一起偏航`,
       detail: '这不是单边错误。更准确的模式是：你开旁支，agent 不设边界，结果协作一起偏航。',
       evidence: uniqueValues([...userSideQuestSessions, ...pivotSessions].map((session) => session.caseSummary.title))
+    });
+  }
+  if (truthRiskSessions.length > 0) {
+    interaction.push({
+      title: '会话一旦拉太长，收尾动作就会污染主线判断',
+      detail: '这不是单边错误，而是长会话里的真实协作风险：最后几步顺手动作和文件痕迹，会反过来污染整轮到底做了什么的判断。',
+      evidence: truthRiskSessions.map((session) => session.caseSummary.title)
     });
   }
 
@@ -1620,6 +2145,9 @@ function buildDailyRealityEntry(session) {
     worth = resolutionType === 'shipped'
       ? '这条不是无用功，因为它真的把外部世界往前推了一步。'
       : '这条不是无用功，因为内容本身已经推进了，只是最后卡在交付链路。';
+  } else if (resolutionType === 'unverified-landing') {
+    badge = '落点待核实';
+    worth = '这条最值得警惕：会话里确实有动作和文件痕迹，但现在还不能诚实地说这些动作就是原始目标的落地。';
   } else if (['diagnosis-complete', 'disproved-path'].includes(resolutionType)) {
     bucket = 'clarified';
     badge = resolutionType === 'diagnosis-complete' ? '查清根因' : '证伪路径';
@@ -1677,23 +2205,516 @@ function buildCaseItem(session) {
     turnText: session.caseSummary.turnText,
     firstWrongTurn: session.caseSummary.firstWrongTurn,
     reviewDepth: session.compaction.reviewDepth,
-    resolutionType: session.analysis.resolutionType
+    resolutionType: session.analysis.resolutionType,
+    interactionVerdict: session.behavior.interactionVerdict,
+    carryForward: Array.isArray(session.carryForward) ? session.carryForward : []
   };
 }
 
+function pickRepresentativeSession(sessions) {
+  return [...sessions].sort((left, right) => {
+    const scoreDelta = casePriorityScore(right) - casePriorityScore(left);
+    if (scoreDelta !== 0) {
+      return scoreDelta;
+    }
+    return String(right.endAt || '').localeCompare(String(left.endAt || ''));
+  })[0];
+}
+
+function formatTimeSpan(startAt, endAt) {
+  const start = formatTimeOnly(startAt);
+  const end = formatTimeOnly(endAt);
+  if (!start && !end) {
+    return '—';
+  }
+  if (!start || start === end) {
+    return start || end;
+  }
+  return `${start} - ${end}`;
+}
+
+function buildVerificationState(session) {
+  const resolutionType = session.analysis && session.analysis.resolutionType;
+
+  if (resolutionType === 'shipped') {
+    return {
+      label: '已核实：真的推进了',
+      detail: '对话和落点基本一致，这件事不是假忙。'
+    };
+  }
+  if (resolutionType === 'diagnosis-complete') {
+    return {
+      label: '已核实：已查清根因',
+      detail: '虽然不一定改了文件，但关键不确定性已经明显下降。'
+    };
+  }
+  if (resolutionType === 'disproved-path') {
+    return {
+      label: '已核实：已证伪路径',
+      detail: '这轮的价值在于尽快排除了错误方向。'
+    };
+  }
+  if (resolutionType === 'packaging-blocked') {
+    return {
+      label: '已核实：内容推进但交付受阻',
+      detail: '内容本体已经推进，问题出在最后一公里。'
+    };
+  }
+  if (resolutionType === 'unverified-landing') {
+    return {
+      label: '待核实：文件痕迹不能单独证明落地',
+      detail: '目前最多能确认停点，不能诚实地说主线已经完成。'
+    };
+  }
+  if (resolutionType === 'adjacent-infra-takeover') {
+    return {
+      label: '偏航：最后落到了旁支',
+      detail: '这轮有动作，但动作已经不是原本那件事。'
+    };
+  }
+  if (resolutionType === 'context-recovery') {
+    return {
+      label: '只到准备：主要在找回上下文',
+      detail: '这轮更像恢复和准备，还不能算独立成果。'
+    };
+  }
+  if (resolutionType === 'churned-exploration') {
+    return {
+      label: '空转：动作很多但没有收成',
+      detail: '忙碌感很强，但没有形成结论、交付或稳定停点。'
+    };
+  }
+
+  return {
+    label: '继续观察',
+    detail: '这条还需要更多上下文才能稳定判断。'
+  };
+}
+
+function buildFirstPrinciplesAudit(session, options = {}) {
+  const resolutionType = session.analysis && session.analysis.resolutionType;
+  const mainlineDiscipline = session.analysis && session.analysis.mainlineDiscipline;
+  const driftOrigin = session.behavior && session.behavior.driftOrigin;
+  const count = Number(options.count || 1);
+  const compactions = Number(session.derived && session.derived.compactions || 0);
+  const aborts = Number(session.derived && session.derived.aborts || 0);
+  const totalTools = Number(session.derived && session.derived.totalTools || 0);
+
+  let valueLabel = '两者都没有';
+  let valueDetail = '目前看不到明确的外部变化，也没有把关键不确定性真正压下去。';
+
+  if (resolutionType === 'shipped') {
+    valueLabel = '改变了世界';
+    valueDetail = '这条不只是“做了很多”，而是真的让外部状态往前走了一步。';
+  } else if (resolutionType === 'packaging-blocked') {
+    valueLabel = '世界差一点就变了';
+    valueDetail = '内容本体已经推进，只是最后一公里没送达。';
+  } else if (resolutionType === 'adjacent-infra-takeover') {
+    valueLabel = '世界确实变了，但变错了地方';
+    valueDetail = '这轮有产出，但产出的不是你原本想推动的那件事。';
+  } else if (['diagnosis-complete', 'disproved-path'].includes(resolutionType)) {
+    valueLabel = '减少了关键不确定性';
+    valueDetail = '虽然不一定有新文件，但它让后续少走很多弯路。';
+  } else if (resolutionType === 'context-recovery') {
+    valueLabel = '主要是在重新站起来';
+    valueDetail = '这轮的价值更多是恢复上下文，不是形成独立成果。';
+  } else if (resolutionType === 'unverified-landing') {
+    valueLabel = '现在不能诚实地说世界变了';
+    valueDetail = '动作和文件痕迹是有的，但还不够证明主线真的落地。';
+  } else if (resolutionType === 'churned-exploration') {
+    valueLabel = '两者都没有';
+    valueDetail = '忙碌感很强，但既没交付，也没把问题说透。';
+  } else if (resolutionType === 'exploration') {
+    valueLabel = '目前最多只是铺垫';
+    valueDetail = '它可能在给后续做准备，但这轮本身还谈不上收成。';
+  }
+
+  let busyReason = '这条本身不算假忙，主要价值已经比较清楚。';
+  if (resolutionType === 'adjacent-infra-takeover') {
+    busyReason = '因为旁支任务看起来也很像“在推进”，所以会制造一种主线还在向前的错觉。';
+  } else if (resolutionType === 'unverified-landing') {
+    busyReason = '因为文件痕迹很强、动作也很多，但对话并没有把“到底完成了什么”说死。';
+  } else if (resolutionType === 'packaging-blocked') {
+    busyReason = '因为内容已经接近完成，所以很容易误以为全链路已经闭环。';
+  } else if (resolutionType === 'churned-exploration') {
+    busyReason = '因为大量时间花在继续动作、补上下文、重接思路，却没有强制收束成一句判断。';
+  } else if (resolutionType === 'context-recovery') {
+    busyReason = '因为恢复上下文本来就会产生很多阅读和确认动作，但这些动作不会自动转成交付。';
+  } else if (['diagnosis-complete', 'disproved-path'].includes(resolutionType)) {
+    busyReason = '因为这类价值体现在“少走弯路”，不像写出文件那样显眼，所以很容易被误看成没产出。';
+  } else if (mainlineDiscipline === 'mixed') {
+    busyReason = '因为多个问题框架混在同一个 session 里，表面很满，实则注意力被摊薄。';
+  } else if (compactions > 0 || aborts > 0) {
+    busyReason = '因为 compact/abort 打断了原来的论证链，后面虽然继续做动作，但判断在不断重来。';
+  } else if (totalTools >= 10 && resolutionType !== 'shipped') {
+    busyReason = '因为工具调用很多，容易制造“做了很多事”的错觉，但工具次数本身不等于收成。';
+  }
+
+  if (count >= 2 && ['unverified-landing', 'churned-exploration', 'adjacent-infra-takeover', 'exploration'].includes(resolutionType)) {
+    busyReason = `这件事今天被反复拉起 ${count} 次，真正消耗时间的是重开和折返，不是线性推进。`;
+  }
+
+  let userRootCause = '你这边没有明显失手，主要问题不在开场目标。';
+  if (driftOrigin === 'user-opened-side-quest') {
+    userRootCause = '你把旁支问题直接插进当前主线，没有及时放进停车场。';
+  } else if (session.analysis && session.analysis.promptArchetype === 'vague-memory') {
+    userRootCause = '你给了方向感，但没有给清楚可验收边界，agent 只能自己补规格。';
+  } else if (resolutionType === 'unverified-landing') {
+    userRootCause = '你允许长会话不断顺手加动作，导致最后很难回答“这轮到底算完成了什么”。';
+  } else if (mainlineDiscipline === 'mixed') {
+    userRootCause = '你默认一个 session 可以顺手并进第二件事，单主线纪律开始松了。';
+  }
+
+  let agentRootCause = 'AI 这边没有明显失手，至少主线没有被它主动带歪。';
+  if (resolutionType === 'adjacent-infra-takeover') {
+    agentRootCause = 'AI 没守住原始目标，顺着旁支把会话做成了另一件事。';
+  } else if (resolutionType === 'unverified-landing') {
+    agentRootCause = 'AI 把“碰过哪些文件”和“真正完成了什么”混在了一起。';
+  } else if (resolutionType === 'packaging-blocked') {
+    agentRootCause = 'AI 没把平台/体积/传输约束前置检查，导致最后一公里爆雷。';
+  } else if (resolutionType === 'churned-exploration') {
+    agentRootCause = 'AI 一直在继续动作，但没有逼自己收束成清楚判断。';
+  } else if (mainlineDiscipline === 'mixed') {
+    agentRootCause = 'AI 没有把次级问题压回停车场，而是默认同轮并进。';
+  }
+
+  let mechanismRootCause = '机制层目前没有明显拖后腿。';
+  if (compactions > 0 || aborts > 0) {
+    mechanismRootCause = '长会话对 compact/abort 太脆，论证链一断，后面很容易只剩忙感。';
+  } else if (resolutionType === 'unverified-landing') {
+    mechanismRootCause = '当前复盘机制仍然太容易被文件痕迹诱导，把活动误读成成果。';
+  } else if (resolutionType === 'adjacent-infra-takeover' || mainlineDiscipline === 'mixed') {
+    mechanismRootCause = '当前流程缺少硬性的边界提醒和停车场机制，旁支一进来就会争主线。';
+  } else if (resolutionType === 'packaging-blocked') {
+    mechanismRootCause = '交付链路没有前置验收清单，平台限制总是在最后才暴露。';
+  } else if (session.analysis && session.analysis.promptArchetype === 'session-recovery') {
+    mechanismRootCause = '恢复类 session 和执行类 session 还没有被明确分开看待。';
+  }
+
+  return {
+    valueLabel,
+    valueDetail,
+    busyReason,
+    userRootCause,
+    agentRootCause,
+    mechanismRootCause
+  };
+}
+
+function buildGroupedFirstPrinciplesAudit(sessions, representative) {
+  const base = representative.firstPrinciples || buildFirstPrinciplesAudit(representative, {
+    count: Array.isArray(sessions) ? sessions.length : 1
+  });
+  if (!Array.isArray(sessions) || sessions.length <= 1) {
+    return base;
+  }
+  return {
+    ...base,
+    busyReason: ['改变了世界', '减少了关键不确定性', '世界差一点就变了', '世界确实变了，但变错了地方'].includes(base.valueLabel)
+      ? `这件事今天被拉起 ${sessions.length} 次。虽然过程有折返，但最后至少留下了真实结果。`
+      : base.busyReason
+  };
+}
+
+function getTurnAtIndex(session, index) {
+  const turns = Array.isArray(session && session.transcriptTurns) ? session.transcriptTurns : [];
+  if (!Number.isInteger(index) || index < 0 || index >= turns.length) {
+    return null;
+  }
+  return turns[index];
+}
+
+function findFirstTurn(session, role) {
+  const turns = Array.isArray(session && session.transcriptTurns) ? session.transcriptTurns : [];
+  return turns.find((turn) => turn.role === role && turn.text) || null;
+}
+
+function findLastTurn(session, role) {
+  const turns = Array.isArray(session && session.transcriptTurns) ? session.transcriptTurns : [];
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    if (turns[index].role === role && turns[index].text) {
+      return turns[index];
+    }
+  }
+  return null;
+}
+
+function pushEvidenceSpan(target, span) {
+  if (!span || !span.text) {
+    return;
+  }
+
+  const normalized = {
+    label: span.label || '证据',
+    speaker: span.speaker || 'AI 助手',
+    timestamp: span.timestamp || '',
+    text: truncate(span.text, 120)
+  };
+
+  const key = `${normalized.label}::${normalized.speaker}::${normalized.timestamp}::${normalized.text}`;
+  if (target.some((item) => `${item.label}::${item.speaker}::${item.timestamp}::${item.text}` === key)) {
+    return;
+  }
+  target.push(normalized);
+}
+
+function buildGroupEvidenceTrail(sessions, representative) {
+  const ordered = Array.isArray(sessions) ? sessions : [];
+  if (!ordered.length) {
+    return [];
+  }
+
+  const firstSession = ordered[0];
+  const lastSession = ordered[ordered.length - 1];
+  const openingTurn = findFirstTurn(firstSession, 'user');
+  const closingTurn = findLastTurn(lastSession, 'assistant');
+  const pivotTurn = getTurnAtIndex(representative, representative.caseSummary && representative.caseSummary.turnIndex);
+  const spans = [];
+
+  pushEvidenceSpan(spans, openingTurn && {
+    label: '开场原话',
+    speaker: '你',
+    timestamp: openingTurn.timestamp,
+    text: openingTurn.text
+  });
+
+  if (pivotTurn && representative.caseSummary && representative.caseSummary.turnLabel && representative.caseSummary.turnLabel !== '这轮主要在做什么') {
+    pushEvidenceSpan(spans, {
+      label: representative.caseSummary.turnLabel,
+      speaker: pivotTurn.role === 'user' ? '你' : assistantPrefix(representative),
+      timestamp: pivotTurn.timestamp,
+      text: pivotTurn.text
+    });
+  } else if (representative.caseSummary && representative.caseSummary.turnText && representative.caseSummary.turnText !== '没有明显的偏航转折。') {
+    pushEvidenceSpan(spans, {
+      label: representative.caseSummary.turnLabel || '关键转折',
+      speaker: assistantPrefix(representative),
+      timestamp: representative.endAt || '',
+      text: representative.caseSummary.turnText
+    });
+  }
+
+  pushEvidenceSpan(spans, closingTurn && {
+    label: 'AI 停点原话',
+    speaker: assistantPrefix(lastSession),
+    timestamp: closingTurn.timestamp,
+    text: closingTurn.text
+  });
+
+  return spans;
+}
+
+function buildWorkOverviewPriority(item) {
+  let score = 0;
+
+  if ((item.count || 0) >= 2) {
+    score += 16 + Math.min(12, (item.count - 2) * 4);
+  }
+
+  if (item.bucket === 'progress') {
+    score += 24;
+  } else if (item.bucket === 'clarified') {
+    score += 20;
+  } else {
+    score += 8;
+  }
+
+  if (/偏航/.test(item.verificationLabel || '')) {
+    score += 18;
+  }
+  if (/空转/.test(item.verificationLabel || '')) {
+    score += 16;
+  }
+  if (/待核实/.test(item.verificationLabel || '')) {
+    score += 14;
+  }
+  if (/已核实/.test(item.verificationLabel || '')) {
+    score += 10;
+  }
+  if (/继续观察/.test(item.verificationLabel || '')) {
+    score -= 10;
+  }
+
+  if ((item.readHint || '').includes('跨天续用')) {
+    score += 4;
+  }
+  if ((item.readHint || '').includes('出现 compact')) {
+    score += 6;
+  }
+  if ((item.readHint || '').includes('工具动作较多')) {
+    score += 4;
+  }
+  if ((item.title || '').includes('一句话探针')) {
+    score -= 18;
+  }
+
+  return score;
+}
+
+function buildWorkOverviewWhyFirst(item) {
+  const reasons = [];
+
+  if ((item.count || 0) >= 2) {
+    reasons.push(`今天反复拉起 ${item.count} 次`);
+  }
+  if (item.bucket === 'progress') {
+    reasons.push('它真的推动了外部结果');
+  } else if (item.bucket === 'clarified') {
+    reasons.push('它真的减少了关键不确定性');
+  } else if (/偏航/.test(item.verificationLabel || '')) {
+    reasons.push('它暴露了主线被换掉的瞬间');
+  } else if (/空转/.test(item.verificationLabel || '')) {
+    reasons.push('它最像假忙');
+  } else if (/待核实/.test(item.verificationLabel || '')) {
+    reasons.push('它最容易把动作误判成成果');
+  } else {
+    reasons.push('它还没有足够证据证明价值');
+  }
+
+  return reasons.slice(0, 2).join('；');
+}
+
+function buildWorkOverviewSections(items) {
+  const sorted = [...items].sort((left, right) => {
+    const scoreDelta = (right.priorityScore || 0) - (left.priorityScore || 0);
+    if (scoreDelta !== 0) {
+      return scoreDelta;
+    }
+    return String(right.time || '').localeCompare(String(left.time || ''));
+  });
+
+  if (sorted.length <= 4) {
+    return {
+      core: sorted,
+      secondary: [],
+      mapItems: sorted.slice(0, 8)
+    };
+  }
+
+  const core = [];
+  const maxCore = Math.min(6, sorted.length);
+  for (let index = 0; index < sorted.length; index += 1) {
+    const item = sorted[index];
+    if (index < 3 || (core.length < maxCore && (item.priorityScore || 0) >= 24)) {
+      core.push(item);
+    }
+  }
+
+  const used = new Set(core.map((item) => `${item.title}::${item.time}`));
+  const secondary = sorted.filter((item) => !used.has(`${item.title}::${item.time}`));
+
+  return {
+    core,
+    secondary,
+    mapItems: sorted.slice(0, 8)
+  };
+}
+
+function buildWorkOverviewLocation(sessions) {
+  const ordered = Array.isArray(sessions) ? sessions : [];
+  if (!ordered.length) {
+    return '—';
+  }
+  const projectLabels = uniqueValues(ordered.map((session) => session.projectLabel).filter(Boolean));
+  const agentLabels = uniqueValues(ordered.map((session) => formatAgentName(session.agent)).filter(Boolean));
+  return `${projectLabels.join(' / ') || 'unknown'} · ${agentLabels.join(' / ') || 'AI 助手'} · ${formatTimeSpan(ordered[0].startAt, ordered[ordered.length - 1].endAt)}`;
+}
+
+function summarizeGroupedWorkArc(sessions, entries, representative) {
+  const count = sessions.length;
+  const latestEntry = entries[entries.length - 1] || {};
+  const buckets = uniqueValues(entries.map((entry) => entry.bucket));
+  const actual = truncate(latestEntry.actual || representative.analysis.actualLanding || representative.analysis.landingSummary || '—', 180);
+
+  if (count <= 1) {
+    return actual;
+  }
+
+  if (buckets.length === 1) {
+    if (latestEntry.bucket === 'progress') {
+      return `今天围绕这件事来回处理了 ${count} 次，最后至少推进到：${actual}`;
+    }
+    if (latestEntry.bucket === 'clarified') {
+      return `今天围绕这件事反复确认了 ${count} 次，最后真正查清的是：${actual}`;
+    }
+    return `今天在这件事上来回打转了 ${count} 次，但最新停点仍然是：${actual}`;
+  }
+
+  if (buckets.includes('risk') && buckets.includes('progress')) {
+    return `这件事今天被反复拉起 ${count} 次，中途有偏航或空转，但最后至少收到了：${actual}`;
+  }
+  if (buckets.includes('risk') && buckets.includes('clarified')) {
+    return `这件事今天反复折返了 ${count} 次，虽然过程不稳，但最后至少查清了：${actual}`;
+  }
+  return `这件事今天总共出现了 ${count} 次，最新落点是：${actual}`;
+}
+
 function buildWorkOverviewItems(sessions) {
-  return sessions.map((session) => ({
-    sessionId: session.sessionId,
-    time: formatTimeOnly(session.startAt),
-    agent: formatAgentName(session.agent),
-    title: session.caseSummary.title,
-    goal: session.analysis.goalLabel || session.analysis.declaredGoal,
-    actual: truncate(session.analysis.actualLanding || session.analysis.landingSummary || '—', 180),
-    discipline: session.analysis.mainlineDiscipline && session.analysis.mainlineDiscipline !== 'single-thread'
-      ? formatMainlineDiscipline(session.analysis.mainlineDiscipline)
-      : '',
-    verdict: truncate(session.caseSummary.verdict || session.behavior.interactionVerdict || '—', 150)
-  }));
+  const grouped = new Map();
+
+  for (const session of sessions) {
+    const key = session.caseSummary.title || session.sessionId;
+    if (!grouped.has(key)) {
+      grouped.set(key, []);
+    }
+    grouped.get(key).push(session);
+  }
+
+  return Array.from(grouped.values()).map((groupSessions) => {
+    const ordered = [...groupSessions].sort((left, right) => String(left.startAt || '').localeCompare(String(right.startAt || '')));
+    const representative = pickRepresentativeSession(ordered);
+    const firstSession = ordered[0];
+    const lastSession = ordered[ordered.length - 1];
+    const representativeFacts = ensureSessionFacts(representative).facts;
+    const firstFacts = ensureSessionFacts(firstSession).facts;
+    const lastFacts = ensureSessionFacts(lastSession).facts;
+    const realityEntries = ordered.map((session) => buildDailyRealityEntry(session));
+    const latestEntry = realityEntries[realityEntries.length - 1] || {};
+    const disciplines = uniqueValues(
+      ordered
+        .map((session) => session.analysis.mainlineDiscipline && session.analysis.mainlineDiscipline !== 'single-thread'
+          ? formatMainlineDiscipline(session.analysis.mainlineDiscipline)
+          : '')
+        .filter(Boolean)
+    );
+    const verification = buildVerificationState(representative);
+    const readHints = uniqueValues(
+      ordered.flatMap((session) => {
+        const facts = ensureSessionFacts(session).facts || {};
+        return Array.isArray(facts.deepReadReasons) ? facts.deepReadReasons : [];
+      })
+    );
+    const evidenceTrail = buildGroupEvidenceTrail(ordered, representative);
+    const firstPrinciples = buildGroupedFirstPrinciplesAudit(ordered, representative);
+
+    const item = {
+      sessionId: representative.sessionId,
+      time: formatTimeSpan(firstSession.startAt, lastSession.endAt),
+      agent: uniqueValues(ordered.map((session) => formatAgentName(session.agent))).join(' / '),
+      title: representative.caseSummary.title,
+      goal: representative.analysis.goalLabel || representativeFacts.goalLabel || representative.analysis.declaredGoal,
+      actual: summarizeGroupedWorkArc(ordered, realityEntries, representative),
+      discipline: disciplines.join('，'),
+      verdict: truncate(representative.caseSummary.verdict || representative.behavior.interactionVerdict || '—', 180),
+      badge: latestEntry.badge || '',
+      bucket: latestEntry.bucket || 'risk',
+      count: ordered.length,
+      location: buildWorkOverviewLocation(ordered),
+      verificationLabel: verification.label,
+      verificationDetail: verification.detail,
+      openingUserQuote: firstFacts.openingUserQuote,
+      closingAssistantQuote: lastFacts.closingAssistantQuote,
+      latestUserQuote: lastFacts.latestUserQuote,
+      keyTurn: representative.caseSummary.turnText || '',
+      readHint: readHints.length ? readHints.join('；') : '',
+      evidenceTrail,
+      firstPrinciples
+    };
+
+    item.priorityScore = buildWorkOverviewPriority(item);
+    item.whyFirst = buildWorkOverviewWhyFirst(item);
+    return item;
+  });
 }
 
 function buildHeuristicGoodPatterns(sessions) {
@@ -1725,6 +2746,7 @@ function buildHeuristicGoodPatterns(sessions) {
 function buildHeuristicIssues(sessions) {
   const deliverables = sessions.filter((session) => session.derived.hasDeliverable);
   const adjacentSessions = sessions.filter((session) => session.analysis.resolutionType === 'adjacent-infra-takeover');
+  const truthRiskSessions = sessions.filter((session) => session.analysis.resolutionType === 'unverified-landing');
   const mixedMainlineSessions = sessions.filter((session) => session.analysis.mainlineDiscipline === 'mixed');
   const blockedSessions = sessions.filter((session) => session.analysis.resolutionType === 'packaging-blocked');
   const vaguePromptSessions = sessions.filter((session) => session.analysis.promptArchetype === 'vague-memory');
@@ -1760,6 +2782,16 @@ function buildHeuristicIssues(sessions) {
         .filter((session) => session.derived.compactions > 0 || session.derived.aborts > 0)
         .map((session) => session.caseSummary.title),
       recommendation: '把长探索拆成更小的可验证回合，并在每轮结束时写出 carry-forward，避免 compact/abort 把论证链掐断。'
+    });
+  }
+  if (truthRiskSessions.length > 0) {
+    issues.push({
+      title: 'Some sessions have file traces that do not prove the real landing',
+      humanTitle: '有些 session 的“落地”只是文件痕迹，不是真正闭环',
+      primaryBucket: 'mixed',
+      confidence: truthRiskSessions.length >= 2 ? 'high' : 'medium',
+      evidence: truthRiskSessions.map((session) => session.caseSummary.title),
+      recommendation: '先按对话里真正形成的结论判断会话价值；文件路径只能当辅助证据，不能单独冒充主线落地。'
     });
   }
   if (blockedSessions.length > 0) {
@@ -1812,10 +2844,13 @@ function mergeCompactedSession(heuristicSession, compact) {
     resolutionType: compact.resolutionType || heuristicSession.analysis.resolutionType,
     goalFidelity: compact.goalFidelity || heuristicSession.analysis.goalFidelity,
     semanticPivot: typeof compact.semanticPivot === 'boolean' ? compact.semanticPivot : heuristicSession.analysis.semanticPivot,
+    truthRisk: heuristicSession.analysis.truthRisk,
+    needsSemanticReview: false,
     goalTag: compact.goalTag || heuristicSession.analysis.goalTag,
     goalLabel: compact.goalLabel || heuristicSession.analysis.goalLabel,
     landingTag: compact.landingTag || heuristicSession.analysis.landingTag,
     landingLabel: compact.landingLabel || heuristicSession.analysis.landingLabel,
+    landingSupportedByConversation: heuristicSession.analysis.landingSupportedByConversation,
     secondaryTopicLabels: Array.isArray(compact.secondaryTopicLabels) ? compact.secondaryTopicLabels : heuristicSession.analysis.secondaryTopicLabels,
     mainlineDiscipline: compact.mainlineDiscipline || heuristicSession.analysis.mainlineDiscipline,
     problemSource: compact.problemSource || heuristicSession.analysis.problemSource
@@ -1855,6 +2890,19 @@ function mergeCompactedSession(heuristicSession, compact) {
       label: compact.resolutionType || heuristicSession.derived.label,
       loopRisk: (compact.resolutionType || heuristicSession.derived.label) === 'churned-exploration'
     },
+    firstPrinciples: (compact.firstPrinciples && compact.firstPrinciples.valueLabel)
+      ? compact.firstPrinciples
+      : heuristicSession.firstPrinciples || buildFirstPrinciplesAudit({
+      analysis: {
+        resolutionType: analysis.resolutionType,
+        promptArchetype: analysis.promptArchetype,
+        mainlineDiscipline: analysis.mainlineDiscipline
+      },
+      behavior: {
+        driftOrigin: compact.driftOrigin || heuristicSession.behavior.driftOrigin
+      },
+      derived: heuristicSession.derived
+    }),
     summaryBucket: compact.bucket || '',
     dailyBadge: compact.badge || '',
     dailyWorth: compact.worth || '',
@@ -1867,6 +2915,10 @@ function shouldRunSemanticCompact(heuristicSession) {
     return false;
   }
 
+  if (heuristicSession.analysis && heuristicSession.analysis.needsSemanticReview) {
+    return true;
+  }
+
   if ((heuristicSession.compaction && heuristicSession.compaction.reviewDepth) === 'deep') {
     return true;
   }
@@ -1877,6 +2929,7 @@ function shouldRunSemanticCompact(heuristicSession) {
 
   return [
     'adjacent-infra-takeover',
+    'unverified-landing',
     'diagnosis-complete',
     'disproved-path',
     'packaging-blocked',
@@ -1885,8 +2938,14 @@ function shouldRunSemanticCompact(heuristicSession) {
 }
 
 function buildTomorrowRule(sessions) {
+  if (sessions.some((session) => session.analysis.resolutionType === 'unverified-landing')) {
+    return '先看对话里到底形成了什么结论，再决定这些文件痕迹算不算真正落地。';
+  }
   if (sessions.some((session) => session.behavior.driftOrigin === 'user-opened-side-quest')) {
     return '主线 session 内想到的新问题一律先放进“停车场”，不直接插进当前会话。';
+  }
+  if (sessions.some((session) => session.analysis.resolutionType === 'unverified-landing')) {
+    return '先把“对话里真正形成的结论”写成一句话，再决定文件痕迹算不算这条主线的落地。';
   }
   if (sessions.some((session) => session.analysis.resolutionType === 'packaging-blocked')) {
     return '凡是最终要发 Telegram / 发 HTML / 发文档的任务，开头先检查交付约束，不要等到最后一公里才发现限制。';
@@ -1895,6 +2954,61 @@ function buildTomorrowRule(sessions) {
     return '当一个探索回合开始发散时，先要求 Codex 用一句话总结当前结论，再决定是否继续。';
   }
   return '先让 Codex 解释清楚根因，再决定要不要改文件。';
+}
+
+function uniqueSessionsByCaseTitle(sortedSessions) {
+  const seen = new Set();
+  const unique = [];
+
+  for (const session of sortedSessions) {
+    const key = session.caseSummary && session.caseSummary.title
+      ? session.caseSummary.title
+      : session.sessionId;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    unique.push(session);
+  }
+
+  return unique;
+}
+
+function buildQualityGate(report) {
+  const issues = [];
+  const sessions = Array.isArray(report.sessions) ? report.sessions : [];
+  const unresolvedTruthRisk = sessions.filter((session) => session.analysis
+    && session.analysis.needsSemanticReview
+    && (!session.compaction || session.compaction.source !== 'compact'));
+  if (unresolvedTruthRisk.length > 0) {
+    issues.push({
+      title: '仍有落点待核实的 session',
+      detail: `这些 session 目前只能看到动作或文件痕迹，还没有足够对话证据证明主线真的落地：${unresolvedTruthRisk.map((session) => session.caseSummary.title).join('；')}`,
+      evidence: unresolvedTruthRisk.map((session) => session.caseSummary.title)
+    });
+  }
+
+  const genericUserCount = sessions.filter((session) => session.behavior && session.behavior.userVerdict === '这轮里你的使用行为没有暴露出明显坏习惯。').length;
+  const genericInteractionCount = sessions.filter((session) => session.behavior && session.behavior.interactionVerdict === '这轮人机配合总体稳定。').length;
+  if (genericUserCount >= 6) {
+    issues.push({
+      title: '用户行为判断过于模板化',
+      detail: `有 ${genericUserCount} 条 session 仍然落在默认的用户侧判断上，说明日报还没有真正看懂这些会话。`,
+      evidence: []
+    });
+  }
+  if (genericInteractionCount >= 6) {
+    issues.push({
+      title: '互动模式判断过于模板化',
+      detail: `有 ${genericInteractionCount} 条 session 仍然落在默认的人机互动判断上，说明互动层分析还在复读。`,
+      evidence: []
+    });
+  }
+
+  return {
+    pass: issues.length === 0,
+    issues
+  };
 }
 
 async function analyzeDayActivity(collected, options = {}) {
@@ -1908,11 +3022,26 @@ async function analyzeDayActivity(collected, options = {}) {
     cacheDir: options.cacheDir || ''
   });
 
+  const normalizedSessions = (collected.sessions || []).map((session) => ensureSessionFacts(session));
+  const heuristicEntries = normalizedSessions.map((session) => ({
+    session,
+    heuristicSession: buildSessionAnalysis(session, collected.homeDir)
+  }));
+  const semanticKeys = pickSemanticCompactionKeys(
+    heuristicEntries.map((entry) => entry.heuristicSession),
+    analysisMode,
+    options
+  );
+
   const sessions = [];
-  for (const session of collected.sessions) {
-    const heuristicSession = buildSessionAnalysis(session, collected.homeDir);
+  for (const entry of heuristicEntries) {
+    const { session, heuristicSession } = entry;
+    const selectedForSemanticCompact = semanticKeys.has(sessionSemanticKey(heuristicSession));
     const useSemanticCompact = Boolean(sessionCompactor)
-      && (options.sessionCompactor || shouldRunSemanticCompact(heuristicSession));
+      && (options.sessionCompactor
+        || (analysisMode === 'compact-first'
+          ? selectedForSemanticCompact
+          : selectedForSemanticCompact || shouldRunSemanticCompact(heuristicSession)));
 
     if (!useSemanticCompact) {
       sessions.push(heuristicSession);
@@ -1934,7 +3063,7 @@ async function analyzeDayActivity(collected, options = {}) {
   const deliverables = sessions.filter((session) => session.derived.hasDeliverable);
   const adjacentSessions = sessions.filter((session) => session.analysis.resolutionType === 'adjacent-infra-takeover');
   const churnSessions = sessions.filter((session) => session.analysis.resolutionType === 'churned-exploration');
-  const resolvedSessions = sessions.filter((session) => !['exploration', 'churned-exploration', 'context-recovery'].includes(session.analysis.resolutionType));
+  const resolvedSessions = sessions.filter((session) => !['exploration', 'churned-exploration', 'context-recovery', 'unverified-landing'].includes(session.analysis.resolutionType));
   const highFidelitySessions = sessions.filter((session) => session.analysis.goalFidelity === 'high');
   const boundaryPenalty = adjacentSessions.length * 20 + churnSessions.length * 12
     + sessions.reduce((sum, session) => sum + session.derived.compactions * 3 + session.derived.aborts * 6, 0);
@@ -1943,17 +3072,23 @@ async function analyzeDayActivity(collected, options = {}) {
   const fallbackGoodPatterns = buildHeuristicGoodPatterns(sessions);
   const fallbackIssues = buildHeuristicIssues(sessions);
   const dailyReality = buildDailyReality(sessions);
-  const topMistakes = sessions
-    .filter((session) => ['adjacent-infra-takeover', 'packaging-blocked', 'churned-exploration'].includes(session.analysis.resolutionType))
+  const topMistakes = uniqueSessionsByCaseTitle(sessions
+    .filter((session) => ['adjacent-infra-takeover', 'unverified-landing', 'packaging-blocked', 'churned-exploration'].includes(session.analysis.resolutionType))
     .sort((left, right) => casePriorityScore(right) - casePriorityScore(left))
+  )
     .slice(0, 3)
     .map(buildCaseItem);
-  const topWins = sessions
+  const topWins = uniqueSessionsByCaseTitle(sessions
     .filter((session) => ['diagnosis-complete', 'disproved-path', 'shipped'].includes(session.analysis.resolutionType))
     .sort((left, right) => casePriorityScore(right) - casePriorityScore(left))
+  )
     .slice(0, 2)
     .map(buildCaseItem);
-  const topCases = [...topMistakes, ...topWins]
+  const topCases = Array.from(
+    new Map(
+      [...topMistakes, ...topWins].map((item) => [item.title, item])
+    ).values()
+  )
     .sort((left, right) => {
       const leftSession = sessions.find((session) => session.sessionId === left.sessionId);
       const rightSession = sessions.find((session) => session.sessionId === right.sessionId);
@@ -2000,13 +3135,16 @@ async function analyzeDayActivity(collected, options = {}) {
     ? synthesized.issues
     : fallbackIssues;
   const tomorrowRule = synthesized.tomorrowRule || buildTomorrowRule(sessions);
+  const qualityGate = buildQualityGate({ sessions });
+  const workOverview = buildWorkOverviewItems(sessions);
 
   return {
     ...collected,
     generatedAt: new Date().toISOString(),
     verdict: dayNarrative.headline,
     dayNarrative,
-    workOverview: buildWorkOverviewItems(sessions),
+    workOverview,
+    workOverviewSections: buildWorkOverviewSections(workOverview),
     dailyReality,
     behavioralAudit,
     topMistakes,
@@ -2025,6 +3163,7 @@ async function analyzeDayActivity(collected, options = {}) {
     })),
     goodPatterns,
     issues,
+    qualityGate,
     metrics: {
       resolution: Math.round((resolvedSessions.length / Math.max(1, sessions.length)) * 100),
       fidelity: Math.round((highFidelitySessions.length / Math.max(1, sessions.length)) * 100),
@@ -2066,6 +3205,100 @@ function renderListItems(items, formatter) {
   return items.map((item) => `<li>${formatter(item)}</li>`).join('\n');
 }
 
+function uniqueItemsByTitle(items = []) {
+  const seen = new Set();
+  return items.filter((item) => {
+    const key = item && item.title ? item.title : JSON.stringify(item);
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function groupDashboardItems(items = []) {
+  const grouped = new Map();
+
+  for (const item of items) {
+    const key = item.title || item.sessionId;
+    if (!grouped.has(key)) {
+      grouped.set(key, []);
+    }
+    grouped.get(key).push(item);
+  }
+
+  return Array.from(grouped.values()).map((groupItems) => {
+    const first = groupItems[0];
+    const latest = groupItems[groupItems.length - 1];
+    const actual = groupItems.length > 1
+      ? `这件事在这一栏里出现了 ${groupItems.length} 次；最新停点是：${latest.actual}`
+      : latest.actual;
+
+    return {
+      ...latest,
+      actual,
+      count: groupItems.length,
+      agent: uniqueValues(groupItems.map((item) => item.agent)).join(' / '),
+      worth: latest.worth
+    };
+  });
+}
+
+function bucketBadge(bucket) {
+  if (bucket === 'progress') {
+    return '推进';
+  }
+  if (bucket === 'clarified') {
+    return '查清';
+  }
+  return '警惕';
+}
+
+function renderDayMap(items) {
+  if (!items.length) {
+    return '';
+  }
+
+  const lines = items.slice(0, 8).map((item, index) => {
+    const outcome = truncate(item.actual || item.verdict || '—', 34);
+    const arrow = item.bucket === 'progress'
+      ? '-->'
+      : item.bucket === 'clarified'
+        ? '-?->'
+        : '-x->';
+    return `${String(index + 1).padStart(2, '0')}. [${bucketBadge(item.bucket)}] ${truncate(item.title, 22)} ${arrow} ${outcome}`;
+  });
+
+  return `
+    <div class="audit-card">
+      <strong>一天主线地图</strong>
+      <div class="meta-row">先看你这一天反复在碰哪些事，以及它们最后各自停在了哪里。</div>
+      <pre class="ascii">${esc(lines.join('\n'))}</pre>
+    </div>
+  `;
+}
+
+function renderEvidenceTrail(spans) {
+  if (!Array.isArray(spans) || !spans.length) {
+    return '';
+  }
+
+  const lines = [];
+  spans.forEach((span, index) => {
+    const prefix = span.timestamp ? `[${formatTimeOnly(span.timestamp)}] ` : '';
+    lines.push(`${prefix}${span.label} / ${span.speaker}：${span.text}`);
+    if (index < spans.length - 1) {
+      lines.push('   |');
+    }
+  });
+
+  return `
+    <div class="meta-row"><strong>证据链：</strong></div>
+    <pre class="ascii">${esc(lines.join('\n'))}</pre>
+  `;
+}
+
 function renderAuditCards(items) {
   if (!items.length) {
     return '<div class="subtle">—</div>';
@@ -2081,11 +3314,12 @@ function renderAuditCards(items) {
 }
 
 function renderCaseBullets(items, emptyText) {
-  if (!items.length) {
+  const uniqueItems = uniqueItemsByTitle(items);
+  if (!uniqueItems.length) {
     return `<div class="subtle">${esc(emptyText)}</div>`;
   }
 
-  return items.map((item, index) => `
+  return uniqueItems.map((item, index) => `
     <div class="bullet-card">
       <div class="badge">#${index + 1}</div>
       <strong>${esc(item.title)}</strong>
@@ -2095,11 +3329,12 @@ function renderCaseBullets(items, emptyText) {
 }
 
 function renderRealityCards(items, emptyText) {
-  if (!items.length) {
+  const groupedItems = groupDashboardItems(items);
+  if (!groupedItems.length) {
     return `<div class="subtle">${esc(emptyText)}</div>`;
   }
 
-  return items.map((item) => `
+  return groupedItems.map((item) => `
     <div class="session-card">
       <div class="session-header">
         <div>
@@ -2116,26 +3351,75 @@ function renderRealityCards(items, emptyText) {
   `).join('\n');
 }
 
-function renderWorkOverview(items) {
+function renderSecondaryWorkItems(items) {
+  if (!items.length) {
+    return '';
+  }
+
+  return items.map((item) => `
+    <div class="bullet-card">
+      <strong>${esc(item.title)}</strong>
+      <div class="meta-row">${esc(item.time || '—')} · ${esc(item.agent)} · ${esc(item.verificationLabel || '继续观察')}</div>
+      <div class="meta-row">${esc(item.actual || item.verdict || '—')}</div>
+    </div>
+  `).join('\n');
+}
+
+function renderWorkOverview(items, sections = buildWorkOverviewSections(items)) {
   if (!items.length) {
     return '<div class="subtle">这一天没有采集到可展示的 session。</div>';
   }
 
-  return items.map((item) => `
+  const coreItems = sections.core || [];
+  const secondaryItems = sections.secondary || [];
+  const mapItems = sections.mapItems || items;
+
+  return `
+    ${renderDayMap(mapItems)}
+    <div class="audit-card">
+      <strong>首页阅读顺序</strong>
+      <pre class="ascii">${esc([
+        '1. 先看 核心事情：这些最能代表你今天真正做了什么',
+        '2. 再看 零散 / 待核实事情：这些存在，但不该霸占你的注意力',
+        '3. 最后看附录时间线：需要逐 session 深挖时再下去'
+      ].join('\n'))}</pre>
+    </div>
+    <h2>核心事情</h2>
+    <div class="subtle">这里只保留最值得先读的几件事。判断标准不是“字多”，而是“今天是否反复投入、是否真的推进、是否暴露了假忙或偏航”。</div>
+    ${coreItems.map((item) => `
     <article class="session-card">
       <div class="session-header">
         <div>
           <div class="badge">${esc(item.time || '—')}</div>
           <div class="badge">${esc(item.agent)}</div>
+          ${item.badge ? `<div class="badge">${esc(item.badge)}</div>` : ''}
+          ${item.count > 1 ? `<div class="badge">反复处理 ${item.count} 次</div>` : ''}
         </div>
       </div>
       <strong>${esc(item.title)}</strong>
+      <div class="meta-row">为什么先看：${esc(item.whyFirst || '这条最能代表你今天的真实投入。')}</div>
+      <div class="meta-row">你能定位的地方：${esc(item.location || '—')}</div>
+      <div class="meta-row"><strong>核实状态：</strong>${esc(item.verificationLabel || '继续观察')} · ${esc(item.verificationDetail || '这条还需要更多上下文才能稳定判断。')}</div>
       <div class="meta-row">本来要做：${esc(item.goal)}</div>
-      <div class="meta-row">实际做了：${esc(item.actual)}</div>
+      <div class="meta-row">今天这件事的真实轨迹：${esc(item.actual)}</div>
+      <div class="meta-row"><strong>第一性原理判断：</strong>${esc((item.firstPrinciples && item.firstPrinciples.valueLabel) || '继续观察')} · ${esc((item.firstPrinciples && item.firstPrinciples.valueDetail) || '这条还需要更多证据才能判断到底值不值。')}</div>
+      <div class="meta-row"><strong>为什么会显得很忙：</strong>${esc((item.firstPrinciples && item.firstPrinciples.busyReason) || '目前还没有足够信号解释这条为什么会制造忙碌感。')}</div>
+      <div class="meta-row"><strong>责任拆解：</strong></div>
+      <div class="meta-row">你这边：${esc((item.firstPrinciples && item.firstPrinciples.userRootCause) || '暂时没有识别到明确的用户侧根因。')}</div>
+      <div class="meta-row">AI 这边：${esc((item.firstPrinciples && item.firstPrinciples.agentRootCause) || '暂时没有识别到明确的 AI 侧根因。')}</div>
+      <div class="meta-row">机制这边：${esc((item.firstPrinciples && item.firstPrinciples.mechanismRootCause) || '暂时没有识别到明确的机制侧根因。')}</div>
       ${item.discipline ? `<div class="meta-row">单主线纪律：${esc(item.discipline)}</div>` : ''}
       <div class="meta-row">一句话判断：${esc(item.verdict)}</div>
+      ${renderEvidenceTrail(item.evidenceTrail || [])}
+      ${item.readHint ? `<div class="meta-row">深读提示：${esc(item.readHint)}</div>` : ''}
     </article>
-  `).join('\n');
+  `).join('\n')}
+    ${secondaryItems.length ? `
+      <h2>零散 / 待核实事情</h2>
+      <div class="subtle">这些事今天确实出现过，但它们不是你这一天最该先记住的主轴。需要时再去附录按时间线深挖。</div>
+      ${renderSecondaryWorkItems(secondaryItems)}
+    ` : ''}
+  `;
 }
 
 function quoteLabel(actor, polarity) {
@@ -2160,11 +3444,12 @@ function quoteLabel(actor, polarity) {
 }
 
 function renderCaseCards(items) {
-  if (!items.length) {
+  const uniqueItems = uniqueItemsByTitle(items);
+  if (!uniqueItems.length) {
     return '<div class="subtle">今天没有足够强的 case 可展示。</div>';
   }
 
-  return items.map((item) => `
+  return uniqueItems.map((item) => `
     <article class="session-card">
       <div class="session-header">
         <div>
@@ -2192,8 +3477,8 @@ function renderCaseCards(items) {
           <div>${esc(item.turnText || item.firstWrongTurn || '—')}</div>
         </div>
         <div>
-          <div class="label">为什么值得看</div>
-          <div>${esc(item.verdict)}</div>
+          <div class="label">下次怎么改</div>
+          <div>${esc(item.carryForward && item.carryForward.length ? item.carryForward.join('；') : item.interactionVerdict || '—')}</div>
         </div>
       </div>
     </article>
@@ -2201,16 +3486,18 @@ function renderCaseCards(items) {
 }
 
 function renderAppendixSessions(sessions) {
-  return sessions.map((session) => {
+  const ordered = [...sessions].sort((left, right) => String(left.startAt || '').localeCompare(String(right.startAt || '')));
+  return ordered.map((session) => {
     const filenames = listFileBasenames(session.touchedFiles, 6);
     const continuationNote = session.continuedFromPreviousDay
       ? `<div class="meta-row"><strong>跨天续用：</strong>这个 session 最早开始于 ${esc(formatDateTime(session.sessionStartAt))}，本日报只统计 ${esc(session.date)} 这一天的 activity。</div>`
       : '';
     return `
       <details class="evidence-card">
-        <summary>${esc(session.caseSummary.title)} · ${esc(session.sessionId)}</summary>
+        <summary>${esc(formatTimeSpan(session.startAt, session.endAt))} · ${esc(session.caseSummary.title)} · ${esc(session.sessionId)}</summary>
         <div class="evidence-body">
           ${continuationNote}
+          <div class="meta-row"><strong>你能定位的地方：</strong>${esc(`${session.projectLabel} · ${formatAgentName(session.agent)}`)}</div>
           <div class="meta-row"><strong>阅读深度：</strong>${esc(formatReviewDepth(session.compaction.reviewDepth))}</div>
           <div class="meta-row"><strong>单主线纪律：</strong>${esc(formatMainlineDiscipline(session.analysis.mainlineDiscipline || 'single-thread'))}</div>
           <div class="meta-row"><strong>原始目标：</strong>${esc(session.analysis.declaredGoal)}</div>
@@ -2228,6 +3515,7 @@ function renderAppendixSessions(sessions) {
 function renderDailyHtml(report) {
   const agentScope = buildAgentScope((report.summary && report.summary.byAgent) || {});
   const agentBreakdown = buildAgentBreakdown((report.summary && report.summary.byAgent) || {});
+  const workOverviewSections = report.workOverviewSections || buildWorkOverviewSections(report.workOverview || []);
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -2375,6 +3663,19 @@ function renderDailyHtml(report) {
       margin-top: 6px;
       color: var(--muted);
     }
+    .ascii {
+      margin: 12px 0 0;
+      padding: 14px 16px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: #f6f2e8;
+      color: var(--ink);
+      font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      overflow-x: auto;
+    }
     @media (max-width: 860px) {
       .two-col, .three-col, .case-grid {
         grid-template-columns: 1fr;
@@ -2394,13 +3695,13 @@ function renderDailyHtml(report) {
       <h2>这一天你把 ${esc(agentScope)} 用对了吗？</h2>
       <p>${esc(report.dayNarrative.summary)}</p>
       <p class="subtle">来源：${esc(agentBreakdown || '未识别到有效来源')}。</p>
-      <p class="subtle">这份审计只基于本地 session 内容。重点不是“你今天用了多少次 agent”，而是“你今天有没有把 agent 用对、哪里第一次开始偏”。</p>
+      <p class="subtle">这份审计只基于本地 session 内容。重点不是“你今天用了多少次 agent”，而是“你今天有没有把 agent 用对、哪里第一次开始偏、哪几件事其实在反复吞掉你的注意力”。</p>
     </section>
 
     <section class="panel">
       <h2>今天按事情看，你一共做了这些事</h2>
       <div class="subtle">先按人能读懂的方式看这一天都做了哪些事情，再看哪些是真推进、哪些是假忙。</div>
-      ${renderWorkOverview(report.workOverview || [])}
+      ${renderWorkOverview(report.workOverview || [], workOverviewSections)}
     </section>
 
     <section class="panel">
@@ -2473,8 +3774,8 @@ function renderDailyHtml(report) {
     </section>
 
     <section class="panel">
-      <h2>技术附录</h2>
-      <div class="subtle">这里保留 session id 和更技术化的证据，正文不再直接用这些内容轰炸你。</div>
+      <h2>附录时间线</h2>
+      <div class="subtle">这里按 session 时间顺序保留更技术化的证据。正文先讲“按事情”，附录再给你“按时间线”的原始入口。</div>
       ${renderAppendixSessions(report.sessions)}
     </section>
   </main>

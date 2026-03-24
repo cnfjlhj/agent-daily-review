@@ -401,10 +401,24 @@ async function run() {
     /停车场/,
     'should carry the synthesized tomorrow rule into the final report'
   );
+  assert.ok(
+    pivotSession.facts,
+    'compact-mode analysis should still attach stable session facts'
+  );
+  assert.match(
+    pivotSession.facts.location,
+    /Codex|demo-app/,
+    'stable session facts should include a readable location in compact mode'
+  );
 
   const html = renderDailyHtml(analyzed);
   assert.match(html, /这一天你把 Codex \/ Claude Code 用对了吗/, 'html should avoid ambiguous yesterday/today wording');
   assert.match(html, /今天按事情看，你一共做了这些事/, 'html should lead with a human-readable work overview');
+  assert.match(html, /你能定位的地方：/, 'html compact view should include the human-readable location line');
+  assert.match(html, /核实状态：/, 'html compact view should include verification labels in the work overview');
+  assert.match(html, /第一性原理判断：/, 'html compact view should include the first-principles value judgment');
+  assert.match(html, /为什么会显得很忙：/, 'html compact view should explain the busy-looking mechanism');
+  assert.match(html, /责任拆解：/, 'html compact view should expose user\/agent\/mechanism accountability');
   assert.match(html, /这一天你实际上把时间花在了哪里/, 'html should keep the day-truth section with neutral wording');
   assert.match(html, /播客文字版那条/, 'html should show human-readable case titles');
   assert.match(html, /停车场/, 'html should surface the synthesized tomorrow rule');
